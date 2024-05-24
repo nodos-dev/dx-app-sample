@@ -68,21 +68,9 @@ inline void Must(bool cond, const char* errMsg = "Error")
 	if (cond)
 		return;
 	std::cerr << errMsg << std::endl;
+	std::cerr << "Last Error: " << GetLastError() << std::endl;
 	exit(1);
 }
-
-struct Device {
-	ComPtr<ID3D12Device2> DevicePtr = nullptr;
-	Device() {
-		Must(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&DevicePtr)) == S_OK, "Unable to create D3D12 Device");
-		std::cout << "D3D12 Device created" << std::endl;
-	}
-	~Device()
-	{
-		Must(DevicePtr->Release() == 0, "Unable to release D3D12 Device");
-	}
-};
-
 
 int main() {
 	SDL_WindowFlags window_flags =
@@ -100,13 +88,51 @@ int main() {
 		return 1;
 	}
 
-	void* windowHandle = nullptr;
+	HWND windowHandle = nullptr;
 	SDL_SysWMinfo wm_info;
 	SDL_VERSION(&wm_info.version);
 	SDL_GetWindowWMInfo(window, &wm_info);
 	windowHandle = wm_info.info.win.window;
 
-	Device device;
+	ComPtr<ID3D12Device2> device = nullptr;
+	Must(S_OK == D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&device)), "Unable to create D3D12 Device");
+
+	D3D12_FEATURE_DATA_D3D12_OPTIONS options;
+	Must(S_OK == device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS, reinterpret_cast<void*>(&options), sizeof(options)), "D3D12_FEATURE_D3D12_OPTIONS is not supported");
+
+	ComPtr<ID3D12CommandAllocator> cmdAllocator;
+	Must(S_OK == device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, __uuidof(ID3D12CommandAllocator), (void**)&cmdAllocator), "Unable to create CommandAllocator");
+	D3D12_COMMAND_QUEUE_DESC commandQueueDesc = {};
+	commandQueueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+	ComPtr<ID3D12CommandQueue> cmdQueue;
+	Must(S_OK == device->CreateCommandQueue(&commandQueueDesc, __uuidof(ID3D12CommandQueue), (void**)&cmdQueue), "Unable to create CommandQueue");
+
+	// Get the DXGI factory used to create the swap chain.
+	IDXGIFactory2* dxgiFactory = nullptr;
+	Must(S_OK == CreateDXGIFactory2(0, __uuidof(IDXGIFactory2), (void**)&dxgiFactory), "Unable to create DXGIFactory2");
+
+	// Create the swap chain using the command queue, NOT using the device.  Thanks Killeak!
+	ComPtr<IDXGISwapChain3> swapChain;
+	DXGI_SWAP_CHAIN_DESC swapChainDesc{};
+	swapChainDesc.BufferCount = 3;
+	swapChainDesc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+	swapChainDesc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+	swapChainDesc.OutputWindow = windowHandle;
+	swapChainDesc.SampleDesc.Count = 1;
+	swapChainDesc.Windowed = TRUE;
+	swapChainDesc.Flags = 0; //DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+	swapChainDesc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+	Must(S_OK == dxgiFactory->CreateSwapChain(cmdQueue.Get(), &swapChainDesc, (IDXGISwapChain**)swapChain.GetAddressOf()), "Unable to create Swapchain");
+
+	//increase max frame latency when required
+	if (swapChainDesc.Flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT)
+	{
+		swapChain->SetMaximumFrameLatency(3);
+	}
+
+	dxgiFactory->Release();
+
+
 
 	// Initialize Nodos SDK
 	nos::app::FN_CheckSDKCompatibility* pfnCheckSDKCompatibility = nullptr;
@@ -164,6 +190,7 @@ int main() {
 				running = false;
 				break;
 			}
+			// Render triangle on top a texture
 			
 		}
 	}
