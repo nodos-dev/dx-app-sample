@@ -12,6 +12,7 @@
 #include <SDL2/SDL.h>
 #include <SDL_syswm.h>
 #include <wrl/client.h>
+#include <comdef.h>
 using Microsoft::WRL::ComPtr;
 
 // stl
@@ -45,7 +46,13 @@ inline void Must(bool cond, const char* errMsg = "Unspecified")
 
 inline void Must(HRESULT res, const char* errMsg = "Unspecified")
 {
-	return Must(S_OK == res, errMsg);
+	if (S_OK == res)
+		return;
+	std::cerr << "Error: " << errMsg << std::endl;
+	std::cerr << "Details: " << GetLastError() << std::endl;
+	_com_error err(res);
+	std::cerr << err.ErrorMessage() << std::endl;
+	throw;
 }
 
 using namespace DirectX;
@@ -83,17 +90,30 @@ struct HelloTriangle
 	ComPtr<ID3D12Fence> Fence = nullptr;
 	HANDLE FenceEvent = nullptr;
 	UINT64 FenceValues[BACK_BUFFER_COUNT]{};
-	uint32_t FrameIndex = 0;
+	uint32_t SwapChainFrameIndex = 0;
 
 	ComPtr<ID3D12Resource> VertexBuffer;
 	D3D12_VERTEX_BUFFER_VIEW VertexBufferView;
-
+	
+	struct Exported {
+		ComPtr<ID3D12Resource> Texture;
+		HANDLE TextureHandle = nullptr;
+		ComPtr<ID3D12Fence> Fence = nullptr;
+		HANDLE FenceHandle = nullptr;
+		HANDLE FenceEvent = nullptr;
+	};
 	struct {
-		ComPtr<ID3D12Resource> InputTexture;
-		ComPtr<ID3D12Resource> OutputTexture;
-		HANDLE InputHandle = nullptr;
-		HANDLE OutputHandle = nullptr;
+		Exported Input, Output;
 	} Shared;
+
+	uint64_t FrameCounter = 0;
+
+	nos::app::ExecutionState ExecutionState = nos::app::ExecutionState::IDLE;
+	struct
+	{
+		std::queue<std::function<void()>> Queue;
+		std::mutex Mutex;
+	} Tasks;
 
 	HelloTriangle(HWND windowHandle, int width, int height) : Window{ width, height, windowHandle },
 		Viewport{0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height)},
@@ -140,10 +160,70 @@ struct HelloTriangle
 		samplerHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
 		Must(Device->CreateDescriptorHeap(&samplerHeapDesc, IID_PPV_ARGS(&InputTextureSamplersHeap)), "Unable to create Sampler DescriptorHeap");
 
-
-		CreateInputOutputSharedTextures();
 		SetupSwapChain();
+		CreateInputOutputSharedTextures();
 		SetupPipeline();
+	}
+
+	void UpdateSyncState(nos::app::ExecutionState newState)
+	{
+		ExecutionState = newState;
+	}
+
+	void WaitFence(Exported& exported, uint64_t value)
+	{
+		if (exported.Fence->GetCompletedValue() < value)
+		{
+			Must(exported.Fence->SetEventOnCompletion(value, exported.FenceEvent));
+			WaitForSingleObjectEx(exported.FenceEvent, 200, FALSE);
+		}
+	}
+
+	void WaitAndSignalFence(nos::fb::ShowAs showAs, uint64_t frameNumber)
+	{
+		if (ExecutionState != nos::app::ExecutionState::SYNCED)
+			return;
+		switch(showAs)
+		{
+		case nos::fb::ShowAs::INPUT_PIN:
+			{
+				if (!Shared.Input.Fence.Get())
+					return;
+				WaitFence(Shared.Input, 2 * frameNumber + 1);
+				Must(CmdQueue->Signal(Shared.Input.Fence.Get(), 2 * frameNumber + 2));
+				break;
+			}
+		case nos::fb::ShowAs::OUTPUT_PIN:
+			{
+				if (!Shared.Output.Fence.Get())
+					return;
+				WaitFence(Shared.Output, 2 * frameNumber);
+				Must(CmdQueue->Signal(Shared.Output.Fence.Get(), 2 * frameNumber + 1));
+				break;
+			}
+		default:
+			break;
+		}
+	}
+	
+	void RecreateExternalSyncFence(Exported& exported)
+	{
+		if (exported.Fence)
+		{
+			CloseHandle(exported.FenceHandle);
+			exported.Fence = nullptr;
+		}
+		Device->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&exported.Fence));
+		Must(Device->CreateSharedHandle(exported.Fence.Get(), 0, GENERIC_ALL, 0, &exported.FenceHandle));
+		exported.FenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+		if (exported.FenceEvent == nullptr)
+			Must(HRESULT_FROM_WIN32(GetLastError()));
+	}
+	
+	void RecreateExternalSyncFences()
+	{
+		RecreateExternalSyncFence(Shared.Input);
+		RecreateExternalSyncFence(Shared.Output);
 	}
 
 	void SetupSwapChain()
@@ -168,7 +248,7 @@ struct HelloTriangle
 		Must(swapChain1->QueryInterface(IID_PPV_ARGS(&SwapChain)));
 		SwapChain->SetMaximumFrameLatency(3);
 		SwapChainWaitableObject = SwapChain->GetFrameLatencyWaitableObject();
-		FrameIndex = SwapChain->GetCurrentBackBufferIndex();
+		SwapChainFrameIndex = SwapChain->GetCurrentBackBufferIndex();
 
 		auto rtvHandle = RTVHeap->GetCPUDescriptorHandleForHeapStart();
 		RTVDescriptorSize = Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
@@ -184,7 +264,7 @@ struct HelloTriangle
 
 	void SetupPipeline()
 	{
-		Must(Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, CmdAllocators[FrameIndex].Get(), PipelineState.Get(), IID_PPV_ARGS(&CmdList)), "Failed to create command list");
+		Must(Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, CmdAllocators[SwapChainFrameIndex].Get(), PipelineState.Get(), IID_PPV_ARGS(&CmdList)), "Failed to create command list");
 
 		std::vector<CD3DX12_ROOT_PARAMETER1> rootParams;
 		CD3DX12_ROOT_PARAMETER1 rootParam = {};
@@ -242,30 +322,22 @@ struct HelloTriangle
 			}
 		)";
 		constexpr const char* pixelShaderSource = R"(
-		struct PSInput
-		{
-			float4 position : SV_POSITION; // Position of the vertex
-			float4 color : COLOR;          // Color of the vertex
-			float2 texCoord : TEXCOORD;    // Texture coordinates
-		};
-
-		Texture2D backgroundTexture : register(t0); // Texture unit 0
-		SamplerState backgroundTextureSampler : register(s0); // Sampler state
-
-		float4 main(PSInput input) : SV_TARGET
-		{
-			float4 sampledColor = backgroundTexture.Sample(backgroundTextureSampler, input.texCoord);
-
-			// If input.color is not zero, use it; otherwise, use the sampled texture color
-			if (input.color.r > 0 && input.color.g > 0 && input.color.b > 0)
+			struct PSInput
 			{
+				float4 position : SV_POSITION; // Position of the vertex
+				float4 color : COLOR;          // Color of the vertex
+				float2 texCoord : TEXCOORD;    // Texture coordinates
+			};
+
+			Texture2D backgroundTexture : register(t0); // Texture unit 0
+			SamplerState backgroundTextureSampler : register(s0); // Sampler state
+
+			float4 main(PSInput input) : SV_TARGET
+			{
+				float4 sampledColor = backgroundTexture.Sample(backgroundTextureSampler, input.texCoord);
+				// TODO: Alpha blend the color with the vertex color
 				return input.color;
 			}
-			else
-			{
-				return sampledColor;
-			}
-		}
 		)";
 		ComPtr<ID3DBlob> vertexShader;
 		ComPtr<ID3DBlob> pixelShader;
@@ -299,7 +371,6 @@ struct HelloTriangle
 		Must(CmdList->Close());
 
 		CreateVertexBuffer();
-
 		CreateFence();
 	}
 
@@ -324,14 +395,14 @@ struct HelloTriangle
 			&textureDesc,
 			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
 			nullptr,
-			IID_PPV_ARGS(&Shared.InputTexture)), "Failed to create input texture");
+			IID_PPV_ARGS(&Shared.Input.Texture)), "Failed to create input texture");
 
 		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
 		srvDesc.Format = textureDesc.Format;
 		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 		srvDesc.Texture2D.MipLevels = 1;
-		Device->CreateShaderResourceView(Shared.InputTexture.Get(), &srvDesc, InputTexturesHeap->GetCPUDescriptorHandleForHeapStart());
+		Device->CreateShaderResourceView(Shared.Input.Texture.Get(), &srvDesc, InputTexturesHeap->GetCPUDescriptorHandleForHeapStart());
 
 		// Create a texture for the output
 		textureDesc.Flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET | D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
@@ -341,11 +412,11 @@ struct HelloTriangle
 			&textureDesc,
 			D3D12_RESOURCE_STATE_COPY_DEST,
 			nullptr,
-			IID_PPV_ARGS(&Shared.OutputTexture)), "Failed to create output texture");
+			IID_PPV_ARGS(&Shared.Output.Texture)), "Failed to create output texture");
 
 		// Creata shared handle for the input texture
-		Must(Device->CreateSharedHandle(Shared.InputTexture.Get(), nullptr, GENERIC_ALL, nullptr, &Shared.InputHandle), "Failed to create shared handle for input texture");
-		Must(Device->CreateSharedHandle(Shared.OutputTexture.Get(), nullptr, GENERIC_ALL, nullptr, &Shared.OutputHandle), "Failed to create shared handle for output texture");
+		Must(Device->CreateSharedHandle(Shared.Input.Texture.Get(), nullptr, GENERIC_ALL, nullptr, &Shared.Input.TextureHandle), "Failed to create shared handle for input texture");
+		Must(Device->CreateSharedHandle(Shared.Output.Texture.Get(), nullptr, GENERIC_ALL, nullptr, &Shared.Output.TextureHandle), "Failed to create shared handle for output texture");
 	}
 
 	void CreateVertexBuffer()
@@ -388,8 +459,8 @@ struct HelloTriangle
 
 	void CreateFence()
 	{
-		Must(Device->CreateFence(FenceValues[FrameIndex], D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Fence)));
-		FenceValues[FrameIndex]++;
+		Must(Device->CreateFence(FenceValues[SwapChainFrameIndex], D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&Fence)));
+		FenceValues[SwapChainFrameIndex]++;
 
 		// Create an event handle to use for frame synchronization.
 		FenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
@@ -408,36 +479,49 @@ struct HelloTriangle
 	void WaitForGpu()
 	{
 		// Schedule a Signal command in the queue.
-		Must(CmdQueue->Signal(Fence.Get(), FenceValues[FrameIndex]));
+		Must(CmdQueue->Signal(Fence.Get(), FenceValues[SwapChainFrameIndex]));
 
 		// Wait until the fence has been processed.
-		Must(Fence->SetEventOnCompletion(FenceValues[FrameIndex], FenceEvent));
+		Must(Fence->SetEventOnCompletion(FenceValues[SwapChainFrameIndex], FenceEvent));
 		WaitForSingleObjectEx(FenceEvent, INFINITE, FALSE);
 
 		// Increment the fence value for the current frame.
-		FenceValues[FrameIndex]++;
+		FenceValues[SwapChainFrameIndex]++;
 	}
 	
 	void MoveToNextFrame()
 	{
-		const UINT64 currentFenceValue = FenceValues[FrameIndex];
+		const UINT64 currentFenceValue = FenceValues[SwapChainFrameIndex];
 		Must(CmdQueue->Signal(Fence.Get(), currentFenceValue));
 
-		FrameIndex = SwapChain->GetCurrentBackBufferIndex();
+		SwapChainFrameIndex = SwapChain->GetCurrentBackBufferIndex();
 
 		// If the next frame is not ready to be rendered yet, wait until it is ready.
-		if (Fence->GetCompletedValue() < FenceValues[FrameIndex])
+		if (Fence->GetCompletedValue() < FenceValues[SwapChainFrameIndex])
 		{
-			Must(Fence->SetEventOnCompletion(FenceValues[FrameIndex], FenceEvent));
+			Must(Fence->SetEventOnCompletion(FenceValues[SwapChainFrameIndex], FenceEvent));
 			WaitForSingleObjectEx(FenceEvent, INFINITE, FALSE);
 		}
 
 		// Set the fence value for the next frame.
-		FenceValues[FrameIndex] = currentFenceValue + 1;
+		FenceValues[SwapChainFrameIndex] = currentFenceValue + 1;
+
+		WaitAndSignalFence(nos::fb::ShowAs::INPUT_PIN, FrameCounter);
+		WaitAndSignalFence(nos::fb::ShowAs::OUTPUT_PIN, FrameCounter);
+		FrameCounter++;
 	}
 
 	void Render()
 	{
+		{
+			std::unique_lock lock(Tasks.Mutex);
+			while (!Tasks.Queue.empty())
+			{
+				Tasks.Queue.front()();
+				Tasks.Queue.pop();
+			}
+		}
+
 		PopulateCommandList();
 
 		ID3D12CommandList* ppCommandLists[] = { CmdList.Get() };
@@ -456,9 +540,9 @@ struct HelloTriangle
 
 	void PopulateCommandList()
 	{
-		Must(CmdAllocators[FrameIndex]->Reset());
+		Must(CmdAllocators[SwapChainFrameIndex]->Reset());
 
-		Must(CmdList->Reset(CmdAllocators[FrameIndex].Get(), PipelineState.Get()));
+		Must(CmdList->Reset(CmdAllocators[SwapChainFrameIndex].Get(), PipelineState.Get()));
 
 		auto* heap = InputTexturesHeap.Get();
 		CmdList->SetDescriptorHeaps(1, &heap);
@@ -468,40 +552,70 @@ struct HelloTriangle
 
 		CmdList->RSSetViewports(1, &Viewport);
 		CmdList->RSSetScissorRects(1, &ScissorRect);
-		
-		auto bar1 = CD3DX12_RESOURCE_BARRIER::Transition(SwapChainRTResources[FrameIndex].Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
-		CmdList->ResourceBarrier(1, &bar1);
+		CD3DX12_RESOURCE_BARRIER bar;
+		bar = CD3DX12_RESOURCE_BARRIER::Transition(SwapChainRTResources[SwapChainFrameIndex].Get(), D3D12_RESOURCE_STATE_PRESENT, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		CmdList->ResourceBarrier(1, &bar);
 
-		CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(RTVHeap->GetCPUDescriptorHandleForHeapStart(), FrameIndex, RTVDescriptorSize);
+		CD3DX12_CPU_DESCRIPTOR_HANDLE rtvHandle(RTVHeap->GetCPUDescriptorHandleForHeapStart(), SwapChainFrameIndex, RTVDescriptorSize);
 		CmdList->OMSetRenderTargets(1, &rtvHandle, FALSE, nullptr);
 
 		// Record commands.
 		const float clearColor[] = { 0.0f, 0.0f, 0.0f, 1.0f };
 		CmdList->ClearRenderTargetView(rtvHandle, clearColor, 0, nullptr);
+
+		CD3DX12_RESOURCE_BARRIER bars[2];
+		bars[0] = CD3DX12_RESOURCE_BARRIER::Transition(Shared.Input.Texture.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+		bars[1] = CD3DX12_RESOURCE_BARRIER::Transition(SwapChainRTResources[SwapChainFrameIndex].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_DEST);
+		CmdList->ResourceBarrier(2, bars);
+		CmdList->CopyResource( SwapChainRTResources[SwapChainFrameIndex].Get(), Shared.Input.Texture.Get());
+
+		bars[0] = CD3DX12_RESOURCE_BARRIER::Transition(Shared.Input.Texture.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+		bars[1] = CD3DX12_RESOURCE_BARRIER::Transition(SwapChainRTResources[SwapChainFrameIndex].Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_RENDER_TARGET);
+		CmdList->ResourceBarrier(2, bars);
+		
 		CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 		CmdList->IASetVertexBuffers(0, 1, &VertexBufferView);
+
 		CmdList->DrawInstanced(3, 1, 0, 0);
 
-		auto bar2 = CD3DX12_RESOURCE_BARRIER::Transition(SwapChainRTResources[FrameIndex].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
-		CmdList->ResourceBarrier(1, &bar2);
-		CmdList->CopyResource(Shared.OutputTexture.Get(), SwapChainRTResources[FrameIndex].Get());
+		bar = CD3DX12_RESOURCE_BARRIER::Transition(SwapChainRTResources[SwapChainFrameIndex].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_COPY_SOURCE);
+		CmdList->ResourceBarrier(1, &bar);
+		CmdList->CopyResource(Shared.Output.Texture.Get(), SwapChainRTResources[SwapChainFrameIndex].Get());
 
 		// Indicate that the back buffer will now be used to present.
-		auto bar3 = CD3DX12_RESOURCE_BARRIER::Transition(SwapChainRTResources[FrameIndex].Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
-		CmdList->ResourceBarrier(1, &bar3);
+		bar = CD3DX12_RESOURCE_BARRIER::Transition(SwapChainRTResources[SwapChainFrameIndex].Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PRESENT);
+		CmdList->ResourceBarrier(1, &bar);
 
 		Must(CmdList->Close());
+	}
+
+	void EnqueueTask(std::function<void()> fun)
+	{
+		std::unique_lock lock(Tasks.Mutex);
+		Tasks.Queue.push(std::move(fun));
 	}
 };
 
 struct SampleEventDelegates : nos::app::IEventDelegates
 {
-	SampleEventDelegates(nos::app::IAppServiceClient* client, struct HelloTriangle* app) : Client(client), App(app) {}
+	SampleEventDelegates(nos::app::IAppServiceClient* client, HelloTriangle* app) : Client(client), App(app) {}
 
 	nos::app::IAppServiceClient* Client;
 	HelloTriangle* App;
 	nos::fb::UUID NodeId{};
 
+	void SendSyncSemaphores()
+	{
+		uint64_t inputSemaphore = (uint64_t)App->Shared.Input.FenceHandle;
+		uint64_t outputSemaphore = (uint64_t)App->Shared.Output.FenceHandle;
+		flatbuffers::FlatBufferBuilder mb;
+		auto offset = nos::CreateAppEventOffset(mb, nos::app::CreateSetSyncSemaphores(mb, &NodeId, getpid(), inputSemaphore, outputSemaphore));
+		mb.Finish(offset);
+		auto buf = mb.Release();
+		auto root = flatbuffers::GetRoot<nos::app::AppEvent>(buf.data());
+		Client->Send(*root);
+	}
+	
 	void OnAppConnected(const nos::fb::Node* appNode) override
 	{
 		std::cout << "Connected to Nodos" << std::endl;
@@ -512,17 +626,31 @@ struct SampleEventDelegates : nos::app::IEventDelegates
 	void OnNodeImported(nos::fb::Node const& appNode) override
 	{
 		NodeId = *appNode.id();
-		auto inputTexDef = ExportSharedTexture(App->Shared.InputHandle, App->Shared.InputTexture.Get());
-		auto outputTexDef = ExportSharedTexture(App->Shared.OutputHandle, App->Shared.OutputTexture.Get());
+		auto inputTexDef = ExportSharedTexture(App->Shared.Input.TextureHandle, App->Shared.Input.Texture.Get());
+		auto outputTexDef = ExportSharedTexture(App->Shared.Output.TextureHandle, App->Shared.Output.Texture.Get());
 		flatbuffers::FlatBufferBuilder fbb;
 		auto inPinId = GenerateId();
 		auto outPinId = GenerateId();
 		std::vector<uint8_t> inputPinBuf = nos::Buffer::From(inputTexDef);
-		std::vector<flatbuffers::Offset<nos::fb::Pin>> pins = {
+		std::vector<uint8_t> outputPinBuf = nos::Buffer::From(outputTexDef);
+		std::vector pins = {
 			nos::fb::CreatePinDirect(fbb, &inPinId, "Input", "nos.sys.vulkan.Texture", nos::fb::ShowAs::INPUT_PIN, nos::fb::CanShowAs::INPUT_PIN_ONLY, 0, 0, &inputPinBuf),
-			nos::fb::CreatePinDirect(fbb, &outPinId, "Output", "nos.sys.vulkan.Texture", nos::fb::ShowAs::OUTPUT_PIN, nos::fb::CanShowAs::OUTPUT_PIN_ONLY, 0, 0, &inputPinBuf)
+			nos::fb::CreatePinDirect(fbb, &outPinId, "Output", "nos.sys.vulkan.Texture", nos::fb::ShowAs::OUTPUT_PIN, nos::fb::CanShowAs::OUTPUT_PIN_ONLY, 0, 0, &outputPinBuf)
 		};
-		fbb.Finish(nos::CreatePartialNodeUpdateDirect(fbb, &NodeId, nos::ClearFlags::CLEAR_PINS, 0, &pins));
+		auto innerNodeId = GenerateId();
+		std::vector nodes = {
+			nos::fb::CreateNodeDirect(fbb, &innerNodeId, "HelloTriangle", "nos.sample.HelloTriangle", 
+			false, false, &pins, 0, nos::fb::NodeContents::Graph, nos::fb::CreateGraphDirect(fbb, 0, 0, 0).o, "Sample-DX12-App")
+		};
+		auto inPortalPinId = GenerateId();
+		auto outPortalPinId = GenerateId();
+		std::vector portalPins = {
+			nos::fb::CreatePinDirect(fbb, &inPortalPinId, "Input", "nos.sys.vulkan.Texture", nos::fb::ShowAs::INPUT_PIN, nos::fb::CanShowAs::INPUT_PIN_ONLY, 0, 0, 0, 0, 0, 0, 0, 0, false, false, false, 0, false, nos::fb::PinContents::PortalPin, nos::fb::CreatePortalPin(fbb, &inPinId).o),
+			nos::fb::CreatePinDirect(fbb, &outPortalPinId, "Output", "nos.sys.vulkan.Texture", nos::fb::ShowAs::OUTPUT_PIN, nos::fb::CanShowAs::OUTPUT_PIN_ONLY, 0, 0, 0, 0, 0, 0, 0, 0, false, false, false, 0, false, nos::fb::PinContents::PortalPin, nos::fb::CreatePortalPin(fbb, &outPinId).o)
+		};
+		fbb.Finish(nos::CreatePartialNodeUpdateDirect(fbb, &NodeId, 
+			nos::ClearFlags::CLEAR_PINS | nos::ClearFlags::CLEAR_NODES, 
+			0, &portalPins, 0, 0, 0, &nodes, 0, 0, 0, nos::fb::CreateOrphanStateDirect(fbb, false, "")));
 		nos::Buffer update = fbb.Release();
 		Client->SendPartialNodeUpdate(*update.As<nos::PartialNodeUpdate>());
 	}
@@ -546,7 +674,7 @@ struct SampleEventDelegates : nos::app::IEventDelegates
 		return def;
 	}
 
-	nos::fb::UUID GenerateId()
+	static nos::fb::UUID GenerateId()
 	{
 		nos::fb::UUID id;
 		std::array<uint8_t, 16> idBytes;
@@ -568,7 +696,18 @@ struct SampleEventDelegates : nos::app::IEventDelegates
 	void OnFunctionCall(nos::fb::UUID const& nodeId, nos::fb::Node const& function) override {}
 	void OnNodeSelected(nos::fb::UUID const& nodeId) override {}
 	void OnConnectionClosed() override {}
-	void OnStateChanged(nos::app::ExecutionState newState) override {}
+	void OnStateChanged(nos::app::ExecutionState newState) override
+	{
+		App->EnqueueTask([this, newState]
+		{
+			if (newState == nos::app::ExecutionState::SYNCED && App->ExecutionState == nos::app::ExecutionState::IDLE)
+			{
+				App->RecreateExternalSyncFences();
+				SendSyncSemaphores();
+			}
+			App->UpdateSyncState(newState);
+		});
+	}
 	void OnConsoleCommand(nos::app::ConsoleCommand const* consoleCommand) override {}
 	void OnConsoleAutoCompleteSuggestionRequest(nos::app::ConsoleAutoCompleteSuggestionRequest const* consoleAutoCompleteSuggestionRequest) override {}
 	void OnLoadNodesOnPaths(nos::app::LoadNodesOnPaths const* loadNodesOnPathsRequest) override {}
@@ -633,7 +772,7 @@ int HelloTriangleMain()
 	if (!client) {
 		std::cerr << "Failed to create App Service Client" << std::endl;
 		return -1;
-	}
+	} 
 	// TODO: Shutdown client
 
 	HelloTriangle app(windowHandle, windowWidth, windowHeight);
@@ -641,24 +780,24 @@ int HelloTriangleMain()
 	auto eventDelegates = std::make_unique<SampleEventDelegates>(client, &app);
 	client->RegisterEventDelegates(eventDelegates.get());
 
-	client->TryConnect();
-	while (!client->IsConnected()) {
-		std::cout << "Trying to connect to Nodos..." << std::endl;
-		std::this_thread::sleep_for(std::chrono::seconds(1));
-		client->TryConnect();
-	}
-
 	// Main loop
 	SDL_Event event;
 	bool running = true;
 	while (running) {
+		while (!client->IsConnected()) {
+			std::cout << "Trying to connect to Nodos..." << std::endl;
+			client->TryConnect();
+			if (!client->IsConnected())
+				std::this_thread::sleep_for(std::chrono::milliseconds(500));
+		}
+		SDL_PumpEvents();
 		while (SDL_PollEvent(&event)) {
 			if (event.type == SDL_QUIT) {
 				running = false;
 				break;
 			}
-			app.Render();
 		}
+		app.Render();
 	}
 
 	app.Destroy();
