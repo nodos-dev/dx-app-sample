@@ -956,7 +956,7 @@ struct SampleEventDelegates : nos::app::IEventDelegates
                            uint64_t frameNumber) override {}
     void OnPinShowAsChanged(nos::fb::UUID const& pinId, nos::fb::ShowAs newShowAs) override {}
     void OnExecuteAppInfo(nos::app::AppExecuteInfo const* appExecuteInfo) override {}
-    void OnFunctionCall(nos::fb::UUID const& nodeId, nos::fb::Node const& function) override {}
+    void OnFunctionCall(nos::app::FunctionCall const* functionCall) override {}
     void OnNodeSelected(nos::fb::UUID const& nodeId) override {}
     void OnConnectionClosed() override {}
     void OnStateChanged(nos::app::ExecutionState newState) override
