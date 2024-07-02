@@ -2,6 +2,7 @@
     "release_globs": [
         "Source/**",
         "External/**",
-        "CMakeLists.txt"
+        "CMakeLists.txt",
+        "README.md"
     ]
 }
