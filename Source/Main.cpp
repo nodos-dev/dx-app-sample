@@ -1,3 +1,5 @@
+// Copyright MediaZ Teknoloji A.S. All Rights Reserved.
+
 #define NOMINMAX 1
 #include <dxgiformat.h> // DXGI_FORMAT
 #include <dxgi1_6.h>

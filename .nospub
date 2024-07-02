@@ -1,0 +1,7 @@
+{
+    "release_globs": [
+        "Source/**",
+        "External/**",
+        "CMakeLists.txt"
+    ]
+}
