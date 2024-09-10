@@ -31,8 +31,8 @@ add_subdirectory(External/DirectX-Headers EXCLUDE_FROM_ALL)
 
 if (DEFINED NOSMAN_WORKSPACE_DIR)
     # Use nosman to get SDK PATH
-    set(NOSMAN_PATH ${NOSMAN_WORKSPACE_DIR}/nosman${CMAKE_EXECUTABLE_SUFFIX})
-    execute_process(COMMAND ${NOSMAN_PATH} --workspace "${NOSMAN_WORKSPACE_DIR}" sdk-info "1.2.0" OUTPUT_VARIABLE NOSMAN_SDK_INFO)
+    set(NOSMAN_PATH ${NOSMAN_WORKSPACE_DIR}/nodos${CMAKE_EXECUTABLE_SUFFIX})
+    execute_process(COMMAND ${NOSMAN_PATH} --workspace "${NOSMAN_WORKSPACE_DIR}" sdk-info "15.0.0" process OUTPUT_VARIABLE NOSMAN_SDK_INFO)
     string(JSON NODOS_SDK_DIR GET ${NOSMAN_SDK_INFO} "path")
     string(STRIP ${NODOS_SDK_DIR} NODOS_SDK_DIR)
     set(NODOS_SDK_DIR ${NODOS_SDK_DIR} CACHE PATH "Path to Nodos SDK")
