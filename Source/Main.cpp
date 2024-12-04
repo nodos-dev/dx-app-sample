@@ -207,7 +207,7 @@ struct HelloTriangle
 		if (exported.Fence->GetCompletedValue() < value)
 		{
 			Must(exported.Fence->SetEventOnCompletion(value, exported.FenceEvent));
-			auto res = WaitForSingleObjectEx(exported.FenceEvent, 200, FALSE);
+			auto res = WaitForSingleObjectEx(exported.FenceEvent, UINT_MAX, FALSE);
 			if (res != WAIT_OBJECT_0)
 				std::cerr << "WaitFence failed: " << GetLastError() << std::endl;
 		}
