@@ -29,22 +29,33 @@ add_subdirectory(External/SDL EXCLUDE_FROM_ALL)
 # DirectX-Headers
 add_subdirectory(External/DirectX-Headers EXCLUDE_FROM_ALL)
 
-if (DEFINED NOSMAN_WORKSPACE_DIR)
+if (DEFINED NODOS_WORKSPACE_DIR)
     # Use nosman to get SDK PATH
-    set(NOSMAN_PATH ${NOSMAN_WORKSPACE_DIR}/nodos${CMAKE_EXECUTABLE_SUFFIX})
-    cmake_path(SET NOSMAN_PATH ${NOSMAN_PATH} NORMALIZE)
-    execute_process(COMMAND ${NOSMAN_PATH} --workspace "${NOSMAN_WORKSPACE_DIR}" sdk-info "1.2.0" OUTPUT_VARIABLE NOSMAN_SDK_INFO)
+    set(NOSMAN_WORKSPACE_DIR ${NODOS_WORKSPACE_DIR})
+    set(NOSMAN_EXECUTABLE ${NODOS_WORKSPACE_DIR}/nodos${CMAKE_EXECUTABLE_SUFFIX})
+    cmake_path(SET NOSMAN_EXECUTABLE ${NOSMAN_EXECUTABLE} NORMALIZE)
+    execute_process(COMMAND ${NOSMAN_EXECUTABLE} --workspace "${NODOS_WORKSPACE_DIR}" sdk-info "1.2.0" OUTPUT_VARIABLE NOSMAN_SDK_INFO)
     string(JSON NODOS_SDK_DIR GET ${NOSMAN_SDK_INFO} "path")
     string(STRIP ${NODOS_SDK_DIR} NODOS_SDK_DIR)
     set(NODOS_SDK_DIR ${NODOS_SDK_DIR} CACHE PATH "Path to Nodos SDK")
     # Make path cross-platform
     string(REPLACE "\\" "/" NODOS_SDK_DIR ${NODOS_SDK_DIR})
 else()
-    if (NOT DEFINED NODOS_SDK_DIR)
-        message(FATAL_ERROR "NODOS_SDK_DIR or NOSMAN_WORKSPACE_DIR is not defined")
-    endif()
+    message(FATAL_ERROR "NODOS_WORKSPACE_DIR is not defined")
 endif()
 list(APPEND CMAKE_MODULE_PATH ${NODOS_SDK_DIR}/cmake)
+
+if (NOT EXISTS ${NODOS_WORKSPACE_DIR}/Toolchain/CMake)
+    message(FATAL_ERROR "Nodos CMake tools not found in workspace")
+endif()
+
+include(${NODOS_WORKSPACE_DIR}/Toolchain/CMake/Scripts/Utils.cmake)
+include(${NODOS_WORKSPACE_DIR}/Toolchain/CMake/Scripts/Projects.cmake)
+
+# Get nos.sys.vulkan
+nos_get_module("nos.sys.vulkan" "5.8" NOS_SYS_VULKAN_TARGET)
+message(STATUS "nos.sys.vulkan target: ${NOS_SYS_VULKAN_TARGET}")
+
 add_library(nosAppSDK INTERFACE)
 target_include_directories(nosAppSDK INTERFACE ${NODOS_SDK_DIR}/include)
 
@@ -52,5 +63,5 @@ set(CMAKE_CXX_STANDARD 20)
 file(GLOB_RECURSE SOURCES Source/*.cpp Source/*.hpp)
 add_executable(NosDxAppSample ${SOURCES})
 target_include_directories(NosDxAppSample PRIVATE Source)
-target_link_libraries(NosDxAppSample PRIVATE nosAppSDK d3d12 dxgi d3dcompiler SDL2-static DirectX-Headers Shlwapi.lib)
+target_link_libraries(NosDxAppSample PRIVATE nosAppSDK ${NOS_SYS_VULKAN_TARGET} d3d12 dxgi d3dcompiler SDL2-static DirectX-Headers Shlwapi.lib)
 target_compile_definitions(NosDxAppSample PRIVATE NODOS_APP_SDK_DLL="${NODOS_SDK_DIR}/bin/nosAppSDK.dll")
