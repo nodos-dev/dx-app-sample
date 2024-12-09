@@ -76,18 +76,29 @@ struct HelloTriangle
 	D3D12_VIEWPORT Viewport;
 	D3D12_RECT ScissorRect;
 	ComPtr<ID3D12Device2> Device = nullptr;
-	ComPtr<ID3D12CommandAllocator> CmdAllocators[BACK_BUFFER_COUNT]{};
+	ComPtr<ID3D12CommandAllocator> CmdAllocators[BACK_BUFFER_COUNT * 3]{};
 	ComPtr<ID3D12CommandQueue> CmdQueue = nullptr;
 
 	ComPtr<IDXGISwapChain3> SwapChain = nullptr;
 	HANDLE SwapChainWaitableObject = nullptr;
 	ComPtr<ID3D12Resource> SwapChainRTResources[BACK_BUFFER_COUNT] = {};
 
-	ComPtr<ID3D12DescriptorHeap> InputTexturesHeap = nullptr;
-	ComPtr<ID3D12DescriptorHeap> InputTextureSamplersHeap = nullptr;
+	enum class TextureType
+	{
+		NodosInputTexture = 0,
+		NodosOutputTexture,
+		IntermediateTexture,
+		SrgbConversionOutputTexture,
+		Count
+	};
+
+	ComPtr<ID3D12DescriptorHeap> TexturesHeap = nullptr;
+	ComPtr<ID3D12DescriptorHeap> TextureSamplersHeap = nullptr;
 	ComPtr<ID3D12DescriptorHeap> RTVHeap = nullptr;
 	uint32_t RTVDescriptorSize = 0;
 
+	ComPtr<ID3D12Resource> IntermediateTexture = nullptr;
+	
 	struct
 	{
 		ComPtr<ID3D12RootSignature> RootSignature = nullptr;
@@ -125,9 +136,12 @@ struct HelloTriangle
 		Exported Input, Output;
 	} Shared;
 
-	uint64_t FrameCounter = 0;
-
+	std::mutex ExecutionMutex;
+	std::condition_variable ExecutionCV;
 	nos::app::ExecutionState ExecutionState = nos::app::ExecutionState::IDLE;
+	std::optional<uint64_t> NodosFrameNumber = std::nullopt;
+
+	uint64_t FrameCounter = 0;
 
 	struct
 	{
@@ -174,7 +188,7 @@ struct HelloTriangle
 		shaderRtViewHeapDesc.NumDescriptors = 10;
 		shaderRtViewHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV;
 		shaderRtViewHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-		Must(Device->CreateDescriptorHeap(&shaderRtViewHeapDesc, IID_PPV_ARGS(&InputTexturesHeap)),
+		Must(Device->CreateDescriptorHeap(&shaderRtViewHeapDesc, IID_PPV_ARGS(&TexturesHeap)),
 			 "Unable to create CBV_SRV_UAV DescriptorHeap");
 
 		D3D12_DESCRIPTOR_HEAP_DESC rtvHeapDesc = {};
@@ -187,7 +201,7 @@ struct HelloTriangle
 		samplerHeapDesc.NumDescriptors = 10;
 		samplerHeapDesc.Type = D3D12_DESCRIPTOR_HEAP_TYPE_SAMPLER;
 		samplerHeapDesc.Flags = D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE;
-		Must(Device->CreateDescriptorHeap(&samplerHeapDesc, IID_PPV_ARGS(&InputTextureSamplersHeap)),
+		Must(Device->CreateDescriptorHeap(&samplerHeapDesc, IID_PPV_ARGS(&TextureSamplersHeap)),
 			 "Unable to create Sampler DescriptorHeap");
 
 		CreateTextures();
@@ -197,44 +211,43 @@ struct HelloTriangle
 		CreateFence();
 	}
 
+	void UpdateSyncState_GrpcThread(nos::app::ExecutionState newState)
+	{
+		std::lock_guard<std::mutex> lock(ExecutionMutex);
+		ExecutionState = newState;
+		if (newState == nos::app::ExecutionState::IDLE)
+			NodosFrameNumber = 0;
+		ExecutionCV.notify_all();
+	}
+
 	void UpdateSyncState(nos::app::ExecutionState newState)
 	{
-		ExecutionState = newState;
+		std::cout << "UpdateSyncState: " << nos::app::EnumNameExecutionState(newState) << "\n";
+		std::lock_guard<std::mutex> lock(ExecutionMutex);
+		if (newState == nos::app::ExecutionState::IDLE)
+			FrameCounter = 0;
 	}
 
-	void WaitFence(Exported& exported, uint64_t value)
+	void WaitOrSignalNodosFence(nos::fb::ShowAs showAs, uint64_t frameNumber, bool wait)
 	{
-		if (exported.Fence->GetCompletedValue() < value)
-		{
-			Must(exported.Fence->SetEventOnCompletion(value, exported.FenceEvent));
-			auto res = WaitForSingleObjectEx(exported.FenceEvent, UINT_MAX, FALSE);
-			if (res != WAIT_OBJECT_0)
-				std::cerr << "WaitFence failed: " << GetLastError() << std::endl;
-		}
-	}
-
-	void WaitAndSignalFence(nos::fb::ShowAs showAs, uint64_t frameNumber)
-	{
-		if (ExecutionState != nos::app::ExecutionState::SYNCED)
-			return;
 		switch (showAs)
 		{
 		case nos::fb::ShowAs::INPUT_PIN:
-			{
-				if (!Shared.Input.Fence.Get())
-					return;
-				WaitFence(Shared.Input, 2 * frameNumber + 1);
+			if (!Shared.Input.Fence.Get())
+				return;
+			if (wait)
+				Must(CmdQueue->Wait(Shared.Input.Fence.Get(), 2 * frameNumber + 1));
+			else
 				Must(CmdQueue->Signal(Shared.Input.Fence.Get(), 2 * frameNumber + 2));
-				break;
-			}
+			break;
 		case nos::fb::ShowAs::OUTPUT_PIN:
-			{
-				if (!Shared.Output.Fence.Get())
-					return;
-				WaitFence(Shared.Output, 2 * frameNumber);
+			if (!Shared.Output.Fence.Get())
+				return;
+			if (wait)
+				Must(CmdQueue->Wait(Shared.Output.Fence.Get(), 2 * frameNumber));
+			else
 				Must(CmdQueue->Signal(Shared.Output.Fence.Get(), 2 * frameNumber + 1));
-				break;
-			}
+			break;
 		default:
 			break;
 		}
@@ -267,6 +280,7 @@ struct HelloTriangle
 	void RecreateExternalSyncFences()
 	{
 		FrameCounter = 0;
+		NodosFrameNumber = 0;
 		RecreateExternalSyncFence(Shared.Input);
 		RecreateExternalSyncFence(Shared.Output);
 	}
@@ -317,10 +331,11 @@ struct HelloTriangle
 			Device->CreateRenderTargetView(SwapChainRTResources[i].Get(), &rtvDesc, rtvHandle);
 			rtvHandle.ptr += RTVDescriptorSize;
 
-			Must(Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&CmdAllocators[i])));
+			for(int a = i * 3; a < i * 3 + 3; a++)
+				Must(Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&CmdAllocators[a])));
 		}
 		
-		Device->CreateRenderTargetView(Shared.Output.Texture.Get(), &rtvDesc, rtvHandle); // Shared output's linear RTV
+		Device->CreateRenderTargetView(IntermediateTexture.Get(), &rtvDesc, rtvHandle); // IntermediateTexture's linear RTV
 		rtvHandle.ptr += RTVDescriptorSize;
 		rtvDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 		Device->CreateRenderTargetView(SrgbConvPipeline.OutputTexture.Get(), &rtvDesc, rtvHandle);
@@ -328,7 +343,7 @@ struct HelloTriangle
 
 	void SetupPipeline()
 	{
-		Must(Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, CmdAllocators[SwapChainFrameIndex].Get(),
+		Must(Device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, CmdAllocators[SwapChainFrameIndex * 3].Get(),
 									   MainPipeline.State.Get(), IID_PPV_ARGS(&CmdList)), "Failed to create command list");
 
 		std::vector<CD3DX12_ROOT_PARAMETER1> rootParams;
@@ -582,29 +597,38 @@ struct HelloTriangle
 		textureDesc.SampleDesc.Quality = 0;
 		textureDesc.Dimension = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
 		
-		auto heapStart = InputTexturesHeap->GetCPUDescriptorHandleForHeapStart();
-		CreateSharedTexture(textureDesc, Shared.Input, heapStart);
-		heapStart.ptr += Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
-		CreateSharedTexture(textureDesc, Shared.Output, heapStart);
-		heapStart.ptr += Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV);
+		auto heapStart = TexturesHeap->GetCPUDescriptorHandleForHeapStart();
+		auto tmpStart = heapStart;
+
+		CreateSharedTexture(textureDesc, Shared.Input, { heapStart.ptr + UINT(TextureType::NodosInputTexture) * Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) });
+		CreateSharedTexture(textureDesc, Shared.Output, { heapStart.ptr + UINT(TextureType::NodosOutputTexture) * Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) });
 		Shared.Input.Texture->SetName(L"Shared Input");
 		Shared.Output.Texture->SetName(L"Shared Output");
 
-		textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
 		auto heapProp = CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT);
 		Must(Device->CreateCommittedResource(&heapProp,
-			D3D12_HEAP_FLAG_SHARED,
+			D3D12_HEAP_FLAG_NONE,
 			&textureDesc,
-			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+			nullptr,
+			IID_PPV_ARGS(&IntermediateTexture)));
+		
+		textureDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+		Must(Device->CreateCommittedResource(&heapProp,
+			D3D12_HEAP_FLAG_NONE,
+			&textureDesc,
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE,
 			nullptr,
 			IID_PPV_ARGS(&SrgbConvPipeline.OutputTexture)));
-
+		
 		D3D12_SHADER_RESOURCE_VIEW_DESC srvDesc = {};
 		srvDesc.Format = textureDesc.Format;
 		srvDesc.ViewDimension = D3D12_SRV_DIMENSION_TEXTURE2D;
 		srvDesc.Shader4ComponentMapping = D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING;
 		srvDesc.Texture2D.MipLevels = 1;
-		Device->CreateShaderResourceView(SrgbConvPipeline.OutputTexture.Get(), &srvDesc, heapStart);
+		Device->CreateShaderResourceView(IntermediateTexture.Get(), &srvDesc, { heapStart.ptr + UINT(TextureType::IntermediateTexture) * Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) });
+		IntermediateTexture->SetName(L"Intermediate Texture");
+		Device->CreateShaderResourceView(SrgbConvPipeline.OutputTexture.Get(), &srvDesc, { heapStart.ptr + UINT(TextureType::SrgbConversionOutputTexture) * Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) });
 		SrgbConvPipeline.OutputTexture->SetName(L"SRGB Conversion Output");
 	}
 
@@ -723,8 +747,69 @@ struct HelloTriangle
 		FenceValues[SwapChainFrameIndex]++;
 	}
 
+	void OnFrameRenderBegin()
+	{
+		/*
+			Wait for input fence to be signalled to framenumber * 2 + 1
+			Begin command list
+			Copy Input to Intermediate
+			Execute command list
+			Signal input fence to framenumber * 2 + 2
+		*/
+		WaitOrSignalNodosFence(nos::fb::ShowAs::INPUT_PIN, FrameCounter, true);
+		BeginCommandListFor(CommandAllocatorType::INPUT_COPIES);
+
+		CD3DX12_RESOURCE_BARRIER bars[2];
+		bars[0] = CD3DX12_RESOURCE_BARRIER::Transition(Shared.Input.Texture.Get(),
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+			D3D12_RESOURCE_STATE_COPY_SOURCE);
+		bars[1] = CD3DX12_RESOURCE_BARRIER::Transition(IntermediateTexture.Get(),
+			D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+			D3D12_RESOURCE_STATE_COPY_DEST);
+		CmdList->ResourceBarrier(2, bars);
+		CmdList->CopyResource(IntermediateTexture.Get(), Shared.Input.Texture.Get());
+		bars[0] = CD3DX12_RESOURCE_BARRIER::Transition(Shared.Input.Texture.Get(),
+						D3D12_RESOURCE_STATE_COPY_SOURCE,
+						D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+		bars[1] = CD3DX12_RESOURCE_BARRIER::Transition(IntermediateTexture.Get(),
+						D3D12_RESOURCE_STATE_COPY_DEST,
+						D3D12_RESOURCE_STATE_RENDER_TARGET);
+		CmdList->ResourceBarrier(2, bars);
+		CloseAndExecuteCommandList();
+		WaitOrSignalNodosFence(nos::fb::ShowAs::INPUT_PIN, FrameCounter, false);
+	}
+
 	void MoveToNextFrame()
 	{
+		/*
+			Wait for output fence to be signalled to framenumber * 2
+			Begin command list
+			Copy Intermediate to Output
+			Execute command list
+			Signal output fence to framenumber * 2 + 1
+			Increase framenumber
+
+			Swapchain
+		*/
+		WaitOrSignalNodosFence(nos::fb::ShowAs::OUTPUT_PIN, FrameCounter, true);
+		BeginCommandListFor(CommandAllocatorType::OUTPUT_COPIES);
+
+		// Copy Intermediate to Output
+		CD3DX12_RESOURCE_BARRIER bars[2];
+		bars[0] = CD3DX12_RESOURCE_BARRIER::Transition(IntermediateTexture.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+		bars[1] = CD3DX12_RESOURCE_BARRIER::Transition(Shared.Output.Texture.Get(), D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+		CmdList->ResourceBarrier(2, bars);
+		CmdList->CopyResource(Shared.Output.Texture.Get(), IntermediateTexture.Get());
+		bars[0] = CD3DX12_RESOURCE_BARRIER::Transition(IntermediateTexture.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+		bars[1] = CD3DX12_RESOURCE_BARRIER::Transition(Shared.Output.Texture.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+		CmdList->ResourceBarrier(2, bars);
+		CloseAndExecuteCommandList();
+		WaitOrSignalNodosFence(nos::fb::ShowAs::OUTPUT_PIN, FrameCounter, false);
+		//Send execution completed
+		
+		
+		FrameCounter++;
+
 		const UINT64 currentFenceValue = FenceValues[SwapChainFrameIndex];
 		Must(CmdQueue->Signal(Fence.Get(), currentFenceValue));
 
@@ -739,13 +824,10 @@ struct HelloTriangle
 
 		// Set the fence value for the next frame.
 		FenceValues[SwapChainFrameIndex] = currentFenceValue + 1;
-
-		WaitAndSignalFence(nos::fb::ShowAs::INPUT_PIN, FrameCounter);
-		WaitAndSignalFence(nos::fb::ShowAs::OUTPUT_PIN, FrameCounter);
-		FrameCounter++;
 	}
 
-	void Render()
+	// Returns processed nodos frame count if it did
+	std::optional<uint64_t> Render()
 	{
 		{
 			std::unique_lock lock(Tasks.Mutex);
@@ -756,14 +838,22 @@ struct HelloTriangle
 			}
 		}
 
-		PopulateCommandList();
+		// Wait for NodosFrameNumber > FrameCounter
+		{
+			std::unique_lock lock(ExecutionMutex);
+			ExecutionCV.wait(lock, [&] { return FrameCounter <= NodosFrameNumber.value_or(0) || ExecutionState == nos::app::ExecutionState::IDLE; });
+			if(ExecutionState == nos::app::ExecutionState::IDLE)
+				return std::nullopt;
+		}
 
-		ID3D12CommandList* ppCommandLists[] = {CmdList.Get()};
-		CmdQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
+		OnFrameRenderBegin();
+
+		RenderMainPipeline();
 
 		Must(SwapChain->Present(1, 0));
-
+		uint64_t processedFrameCounter = FrameCounter;
 		MoveToNextFrame();
+		return processedFrameCounter;
 	}
 
 	void Destroy()
@@ -773,59 +863,65 @@ struct HelloTriangle
 		CloseHandle(FenceEvent);
 	}
 
-	void PopulateCommandList()
+	enum class CommandAllocatorType
 	{
-		Must(CmdAllocators[SwapChainFrameIndex]->Reset());
+		INPUT_COPIES,
+		MAIN_PIPELINE,
+		OUTPUT_COPIES
+	};
 
-		Must(CmdList->Reset(CmdAllocators[SwapChainFrameIndex].Get(), MainPipeline.State.Get()));
+	ID3D12CommandAllocator* GetCommandAllocator(CommandAllocatorType type)
+	{
+		switch (type)
+		{
+		case CommandAllocatorType::INPUT_COPIES:
+			return CmdAllocators[SwapChainFrameIndex * 3].Get();
+		case CommandAllocatorType::MAIN_PIPELINE:
+			return CmdAllocators[SwapChainFrameIndex * 3 + 1].Get();
+		case CommandAllocatorType::OUTPUT_COPIES:
+			return CmdAllocators[SwapChainFrameIndex * 3 + 2].Get();
+		default:
+			return nullptr;
+		}
+	}
 
-		auto* heap = InputTexturesHeap.Get();
+	void BeginCommandListFor(CommandAllocatorType type)
+	{
+		Must(GetCommandAllocator(type)->Reset());
+		Must(CmdList->Reset(GetCommandAllocator(type), MainPipeline.State.Get()));
+	}
+
+	void CloseAndExecuteCommandList()
+	{
+		Must(CmdList->Close());
+		ID3D12CommandList* ppCommandLists[] = {CmdList.Get()};
+		CmdQueue->ExecuteCommandLists(_countof(ppCommandLists), ppCommandLists);
+	}
+
+	void RenderMainPipeline()
+	{
+		BeginCommandListFor(CommandAllocatorType::MAIN_PIPELINE);
+
+		auto* heap = TexturesHeap.Get();
 		CmdList->SetDescriptorHeaps(1, &heap);
 		CmdList->RSSetViewports(1, &Viewport);
 		CmdList->RSSetScissorRects(1, &ScissorRect);
 		
 		// Main Pipeline with triangle
 		{
+			CD3DX12_CPU_DESCRIPTOR_HANDLE intermediateRTVHandle(RTVHeap->GetCPUDescriptorHandleForHeapStart(), BACK_BUFFER_COUNT, RTVDescriptorSize);
+			// Already in RT state
+			CmdList->OMSetRenderTargets(1, &intermediateRTVHandle, FALSE, nullptr);
+
 			CmdList->SetGraphicsRootSignature(MainPipeline.RootSignature.Get());
-			CmdList->SetGraphicsRootDescriptorTable(0, InputTexturesHeap->GetGPUDescriptorHandleForHeapStart());
-
-			CD3DX12_RESOURCE_BARRIER bar;
-			bar = CD3DX12_RESOURCE_BARRIER::Transition(Shared.Output.Texture.Get(),
-													   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-													   D3D12_RESOURCE_STATE_RENDER_TARGET);
-			CmdList->ResourceBarrier(1, &bar);
-
-			CD3DX12_CPU_DESCRIPTOR_HANDLE sharedOutputRtvHandle(RTVHeap->GetCPUDescriptorHandleForHeapStart(), BACK_BUFFER_COUNT,
-													RTVDescriptorSize);
-			CmdList->OMSetRenderTargets(1, &sharedOutputRtvHandle, FALSE, nullptr);
-
-			// Record commands.
-			const float clearColor[] = {0.0f, 0.0f, 0.0f, 1.0f};
-			CmdList->ClearRenderTargetView(sharedOutputRtvHandle, clearColor, 0, nullptr);
-
-			CD3DX12_RESOURCE_BARRIER bars[2];
-			bars[0] = CD3DX12_RESOURCE_BARRIER::Transition(Shared.Input.Texture.Get(),
-														   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-														   D3D12_RESOURCE_STATE_COPY_SOURCE);
-			bars[1] = CD3DX12_RESOURCE_BARRIER::Transition(Shared.Output.Texture.Get(),
-														   D3D12_RESOURCE_STATE_RENDER_TARGET,
-														   D3D12_RESOURCE_STATE_COPY_DEST);
-			CmdList->ResourceBarrier(2, bars);
-			CmdList->CopyResource(Shared.Output.Texture.Get(), Shared.Input.Texture.Get());
-
-			bars[0] = CD3DX12_RESOURCE_BARRIER::Transition(Shared.Input.Texture.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE,
-														   D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE |  D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-			bars[1] = CD3DX12_RESOURCE_BARRIER::Transition(Shared.Output.Texture.Get(),
-														   D3D12_RESOURCE_STATE_COPY_DEST,
-														   D3D12_RESOURCE_STATE_RENDER_TARGET);
-			CmdList->ResourceBarrier(2, bars);
 
 			CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 			CmdList->IASetVertexBuffers(0, 1, &MainPipeline.TriangleBufferView);
 
 			CmdList->DrawInstanced(3, 1, 0, 0);
 
-			bar = CD3DX12_RESOURCE_BARRIER::Transition(Shared.Output.Texture.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+			CD3DX12_RESOURCE_BARRIER bar = CD3DX12_RESOURCE_BARRIER::Transition(IntermediateTexture.Get(), D3D12_RESOURCE_STATE_RENDER_TARGET, 
+				D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 			CmdList->ResourceBarrier(1, &bar);
 		}
 
@@ -833,10 +929,9 @@ struct HelloTriangle
 		{
 			CmdList->SetPipelineState(SrgbConvPipeline.State.Get());
 			CmdList->SetGraphicsRootSignature(SrgbConvPipeline.RootSignature.Get());
-			// Shared output
-			CD3DX12_GPU_DESCRIPTOR_HANDLE sharedOutputStart(InputTexturesHeap->GetGPUDescriptorHandleForHeapStart(), 1, // Shared Output
+			CD3DX12_GPU_DESCRIPTOR_HANDLE intermediateTextureStart(TexturesHeap->GetGPUDescriptorHandleForHeapStart(), UINT(TextureType::IntermediateTexture), // Shared Output
 										  Device->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV));
-			CmdList->SetGraphicsRootDescriptorTable(0, sharedOutputStart);
+			CmdList->SetGraphicsRootDescriptorTable(0, intermediateTextureStart);
 			
 			CD3DX12_CPU_DESCRIPTOR_HANDLE srgbRtvHandle(RTVHeap->GetCPUDescriptorHandleForHeapStart(), BACK_BUFFER_COUNT + 1, // SRGB RTV
 										  RTVDescriptorSize);
@@ -873,7 +968,7 @@ struct HelloTriangle
 			
 		}
 
-		Must(CmdList->Close());
+		CloseAndExecuteCommandList();
 	}
 
 	void EnqueueTask(std::function<void()> fun)
@@ -899,7 +994,7 @@ struct SampleEventDelegates : nos::app::IEventDelegates
 		uint64_t outputSemaphore = (uint64_t)App->Shared.Output.FenceHandle;
 		flatbuffers::FlatBufferBuilder mb;
 		auto offset = nos::CreateAppEventOffset(
-			mb, nos::app::CreateSetSyncSemaphores(mb, &NodeId, getpid(), inputSemaphore, outputSemaphore));
+			mb, nos::app::CreateSetSyncSemaphores(mb, &NodeId, _getpid(), inputSemaphore, outputSemaphore));
 		mb.Finish(offset);
 		auto buf = mb.Release();
 		auto root = flatbuffers::GetRoot<nos::app::AppEvent>(buf.data());
@@ -949,7 +1044,7 @@ struct SampleEventDelegates : nos::app::IEventDelegates
 		ext.mutate_handle((uint64_t)handle);
 		D3D12_RESOURCE_DESC desc = texture->GetDesc();
 		ext.mutate_allocation_size(App->Device->GetResourceAllocationInfo(0, 1, &desc).SizeInBytes);
-		ext.mutate_pid(getpid());
+		ext.mutate_pid(_getpid());
 		def.unmanaged = false;
 		def.unscaled = true;
 		def.handle = 0;
@@ -973,16 +1068,31 @@ struct SampleEventDelegates : nos::app::IEventDelegates
 
 	void OnStateChanged(nos::app::ExecutionState newState)
 	{
+		App->UpdateSyncState_GrpcThread(newState);
 		App->EnqueueTask([this, newState]
 			{
-				if (newState == nos::app::ExecutionState::SYNCED && App->ExecutionState == nos::app::ExecutionState::IDLE)
+				if (newState == nos::app::ExecutionState::SYNCED)
 				{
 					App->RecreateExternalSyncFences();
 					SendSyncSemaphores();
 				}
+				else
+					App->DestroyExternalSyncFences();
 				App->UpdateSyncState(newState);
 			});
 	}
+
+	void OnExecuteStart(nos::app::AppExecuteStart const* appExecuteStart)
+	{
+		std::unique_lock<std::mutex> lock(App->ExecutionMutex);
+		if (appExecuteStart->reset())
+			App->NodosFrameNumber = std::nullopt;
+		else
+			App->NodosFrameNumber = appExecuteStart->frame_counter();
+		std::cout << "Received ExecuteStart: " << appExecuteStart->frame_counter() << std::endl;
+		App->ExecutionCV.notify_all();
+	}
+
 	void HandleEvent(const nos::app::EngineEvent* event) override
 	{
 		using namespace nos::app;
@@ -1000,16 +1110,31 @@ struct SampleEventDelegates : nos::app::IEventDelegates
 			OnNodeImported(*event->event_as<nos::app::NodeImported>()->node());
 			break;
 		}
-
 		case EngineEventUnion::StateChanged: {
 			OnStateChanged(event->event_as<nos::app::StateChanged>()->state());
+			break;
+		}
+		case EngineEventUnion::AppExecuteStart: {
+			OnExecuteStart(event->event_as<nos::app::AppExecuteStart>());
 			break;
 		}
 		default:
 			break;
 		}
 	}
-	void OnConnectionClosed() override {}
+	void OnConnectionClosed() override 
+	{
+		{
+			std::unique_lock lock(App->ExecutionMutex);
+			App->ExecutionState = nos::app::ExecutionState::IDLE;
+			App->ExecutionCV.notify_all();
+		}
+		App->EnqueueTask([this]
+			{
+				App->DestroyExternalSyncFences();
+				App->UpdateSyncState(nos::app::ExecutionState::IDLE);
+			});
+	}
 };
 
 int HelloTriangleMain()
@@ -1106,7 +1231,11 @@ int HelloTriangleMain()
 				break;
 			}
 		}
-		app.Render();
+		if (std::optional<uint64_t> processedFrameNum = app.Render())
+		{
+			flatbuffers::FlatBufferBuilder fbb;
+			client->Send(nos::CreateAppEvent(fbb, nos::app::CreateExecutionCompleted(fbb, &eventDelegates->NodeId, *processedFrameNum)));
+		}
 	}
 
 	app.Destroy();
@@ -1114,6 +1243,9 @@ int HelloTriangleMain()
 	SDL_DestroyWindow(window);
 	SDL_Quit();
 
+	uint64_t frameCounter = app.FrameCounter;
+	flatbuffers::FlatBufferBuilder fbb;
+	client->Send(nos::CreateAppEvent(fbb, nos::app::CreateAppConnectionClosed(fbb, frameCounter)));
 	client->UnregisterEventDelegates();
 	pfnShutdownClient(client);
 
