@@ -1,15 +1,18 @@
-name: Release
+name: Build
 
 on:
   push:
     branches: [ dev ]
   workflow_dispatch:
     inputs:
-      build_all:
-        description: 'Build all modules'
-        required: false
-        default: false
-        type: boolean
+      publish_mode:
+        description: 'Publish Mode'
+        required: true
+        default: 'None'
+        type: choice
+        options:
+          - Publish Content
+          - None
       nodos_sdk_version:
         description: 'Nodos SDK Version'
         required: false
@@ -19,6 +22,16 @@ on:
         description: 'Clean build'
         required: false
         default: false
+        type: boolean
+      linux:
+        description: 'Release for Linux'
+        required: false
+        default: true
+        type: boolean
+      windows:
+        description: 'Release for Windows'
+        required: false
+        default: true
         type: boolean
 
 concurrency:
@@ -36,16 +49,20 @@ jobs:
         id: offset-build-number
         shell: bash
         run: |
-          BUILD_NUMBER=$(( ${{ github.run_number }} + 0 ))
+          BUILD_NUMBER=$(( ${{ github.run_number }} + 16 ))
           echo "build_number=$BUILD_NUMBER" >> $GITHUB_OUTPUT
 
-  call-release-modules:
-    name: Release Modules
+  call-release-samples:
+    name: Build
     needs: set-build-number
-    uses: nodos-dev/actions/.github/workflows/release-modules.yml@main
+    uses: nodos-dev/actions/.github/workflows/samples.yml@main
     with:
       ref_name: ${{ github.ref_name }}
-      build_all: ${{ github.event_name == 'workflow_dispatch' && fromJson(github.event.inputs.build_all) || false }}
+      package_name: "dx-app-sample"
+      package_version: "1.0.0"
+      publish_mode: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.publish_mode || 'None' }}
       nodos_sdk_version: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.nodos_sdk_version || '' }}
       clean: ${{ github.event_name == 'workflow_dispatch' && fromJson(github.event.inputs.clean) || false }}
       build_number: ${{ needs.set-build-number.outputs.build_number }}
+      linux: false
+      windows: ${{ github.event_name == 'workflow_dispatch' && fromJson(github.event.inputs.windows) || github.event_name == 'push' }}
