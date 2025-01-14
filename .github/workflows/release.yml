@@ -23,11 +23,6 @@ on:
         required: false
         default: false
         type: boolean
-      linux:
-        description: 'Release for Linux'
-        required: false
-        default: true
-        type: boolean
       windows:
         description: 'Release for Windows'
         required: false
