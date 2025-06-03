@@ -2,7 +2,6 @@
     "release_globs": [
         "Source/**",
         "Binaries/*.exe",
-        "External/**",
         "CMakeLists.txt",
         "README.md"
     ]
