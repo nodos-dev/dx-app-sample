@@ -1324,6 +1324,12 @@ int main(int argc, char** argv)
 		}
 	}
 
+	char exePath[MAX_PATH];
+	Must(GetModuleFileNameA(nullptr, exePath, MAX_PATH) != 0, "Failed to get executable path.");
+	std::filesystem::path exeDir = std::filesystem::absolute(exePath).parent_path();
+	std::filesystem::path sdkDllCandidate = exeDir / "nosAppSDK.dll";
+	nodosSdkDllPath = sdkDllCandidate.string();
+
 	if (nodosSdkDllPath.empty() || !FileExists(nodosSdkDllPath)){
 		const char* sdkDir = std::getenv("NODOS_SDK_DIR");
 		if (sdkDir) {
