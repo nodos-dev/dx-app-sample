@@ -149,15 +149,19 @@ struct HelloTriangle
 		std::mutex Mutex;
 	} Tasks;
 
-	HelloTriangle(HWND windowHandle, int width, int height) : Window{width, height, windowHandle},
-															  Viewport{
-																  0.0f, 0.0f, static_cast<float>(width),
-																  static_cast<float>(height)
-															  },
-															  ScissorRect{
-																  0, 0, static_cast<LONG>(width),
-																  static_cast<LONG>(height)
-															  }
+	bool EnableVsync;
+
+	HelloTriangle(HWND windowHandle, int width, int height, bool vsyncEnabled, std::optional<uint32_t> gpuIndex) :
+		Window{width, height, windowHandle},
+		Viewport{
+			0.0f, 0.0f, static_cast<float>(width),
+			static_cast<float>(height)
+		},
+		ScissorRect{
+			0, 0, static_cast<LONG>(width),
+			static_cast<LONG>(height)
+		},
+		EnableVsync(vsyncEnabled)
 	{
 #ifdef DX12_ENABLE_DEBUG_LAYER
 		ComPtr<ID3D12Debug> pdx12Debug = nullptr;
@@ -165,8 +169,47 @@ struct HelloTriangle
 			pdx12Debug->EnableDebugLayer();
 #endif
 
-		Must(D3D12CreateDevice(nullptr, D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&Device)),
-			 "Unable to create D3D12 Device");
+		ComPtr<IDXGIFactory6> dxgiFactory;
+		Must(CreateDXGIFactory1(IID_PPV_ARGS(&dxgiFactory)), "Failed to create DXGIFactory");
+
+		std::vector<ComPtr<IDXGIAdapter1>> adapters;
+		ComPtr<IDXGIAdapter1> adapter;
+		UINT index = 0;
+
+		while (dxgiFactory->EnumAdapters1(index, &adapter) != DXGI_ERROR_NOT_FOUND)
+		{
+			DXGI_ADAPTER_DESC1 desc;
+			adapter->GetDesc1(&desc);
+
+			// Skip software adapters
+			if (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)
+			{
+				++index;
+				continue;
+			}
+
+			std::wcout << L"[" << index << L"] " << desc.Description << std::endl;
+			adapters.push_back(adapter);
+			++index;
+		}
+
+		Must(!adapters.empty(), "No suitable adapter found.");
+
+		uint32_t selectedAdapter = 0;
+		if (gpuIndex)
+			selectedAdapter = *gpuIndex;
+		else
+		{
+			std::cout << "Select GPU: ";
+			std::cin >> selectedAdapter;
+		}
+
+		std::wcout << "Selected GPU: " << selectedAdapter << std::endl;
+
+		Must(!(selectedAdapter < 0 || selectedAdapter >= static_cast<uint32_t>(adapters.size())), "Invalid adapter selection.");
+
+		Must(D3D12CreateDevice(adapters[selectedAdapter].Get(), D3D_FEATURE_LEVEL_12_0, IID_PPV_ARGS(&Device)),
+			"Unable to create D3D12 Device");
 
 #ifdef DX12_ENABLE_DEBUG_LAYER
 		if (pdx12Debug != nullptr)
@@ -850,7 +893,7 @@ struct HelloTriangle
 
 		RenderMainPipeline();
 
-		Must(SwapChain->Present(1, 0));
+		Must(SwapChain->Present(EnableVsync ? 1 : 0, 0));
 		uint64_t processedFrameCounter = FrameCounter;
 		MoveToNextFrame();
 		return processedFrameCounter;
@@ -1137,13 +1180,18 @@ struct SampleEventDelegates : nos::app::IEventDelegates
 	}
 };
 
-int HelloTriangleMain()
+int HelloTriangleMain(
+	int windowWidth,
+	int windowHeight,
+	std::optional<uint32_t> gpuIndex,
+	uint64_t sleepMs,
+	bool vsync
+)
 {
 	SDL_WindowFlags window_flags =
 		(SDL_WindowFlags)(SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_SHOWN);
 
-	int windowWidth = 1280;
-	int windowHeight = 720;
+	// Use passed windowWidth and windowHeight
 	SDL_Init(SDL_INIT_VIDEO);
 	SDL_Window* window = SDL_CreateWindow(
 		"Sample DX12 App", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
@@ -1167,45 +1215,27 @@ int HelloTriangleMain()
 	nos::app::FN_ShutdownClient* pfnShutdownClient = nullptr;
 
 	HMODULE sdkModule = LoadLibrary(NODOS_APP_SDK_DLL);
-	if (sdkModule)
-	{
-		pfnCheckSDKCompatibility = (nos::app::FN_CheckSDKCompatibility*)GetProcAddress(
-			sdkModule, "CheckSDKCompatibility");
-		pfnMakeAppServiceClient = (nos::app::FN_MakeAppServiceClient*)GetProcAddress(sdkModule, "MakeAppServiceClient");
-		pfnShutdownClient = (nos::app::FN_ShutdownClient*)GetProcAddress(sdkModule, "ShutdownClient");
-	}
-	else
-	{
-		std::cerr << "Failed to load Nodos SDK" << std::endl;
-		return -1;
-	}
+	Must(sdkModule, "Failed to load Nodos SDK DLL");
+	pfnCheckSDKCompatibility = (nos::app::FN_CheckSDKCompatibility*)GetProcAddress(
+		sdkModule, "CheckSDKCompatibility");
+	pfnMakeAppServiceClient = (nos::app::FN_MakeAppServiceClient*)GetProcAddress(sdkModule, "MakeAppServiceClient");
+	pfnShutdownClient = (nos::app::FN_ShutdownClient*)GetProcAddress(sdkModule, "ShutdownClient");
 
-	if (!pfnCheckSDKCompatibility || !pfnMakeAppServiceClient || !pfnShutdownClient)
-	{
-		std::cerr << "Failed to load Nodos SDK functions" << std::endl;
-		return -1;
-	}
+	Must(pfnCheckSDKCompatibility && pfnMakeAppServiceClient && pfnShutdownClient, "Failed to load Nodos SDK functions");
 
-	if (!pfnCheckSDKCompatibility(NOS_APPLICATION_SDK_VERSION_MAJOR, NOS_APPLICATION_SDK_VERSION_MINOR,
-								  NOS_APPLICATION_SDK_VERSION_PATCH))
-	{
-		std::cerr << "Incompatible Nodos SDK version" << std::endl;
-		return -1;
-	}
+	Must(pfnCheckSDKCompatibility(NOS_APPLICATION_SDK_VERSION_MAJOR, NOS_APPLICATION_SDK_VERSION_MINOR,
+		NOS_APPLICATION_SDK_VERSION_PATCH), "Incompatible Nodos SDK version");
 
-	nos::app::IAppServiceClient* client = pfnMakeAppServiceClient("localhost:50053", nos::app::ApplicationInfo{
-																	  .AppKey = "Sample-DX12-App",
-																	  .AppName = "Sample DX12 App"
-																  });
+	nos::app::IAppServiceClient* client = pfnMakeAppServiceClient("localhost:50053",
+		nos::app::ApplicationInfo {
+			.AppKey = "Sample-DX12-App",
+			.AppName = "Sample DX12 App"
+		}
+	);
 
-	if (!client)
-	{
-		std::cerr << "Failed to create App Service Client" << std::endl;
-		return -1;
-	}
-	// TODO: Shutdown client
+	Must(client, "Failed to create App Service Client");
 
-	HelloTriangle app(windowHandle, windowWidth, windowHeight);
+	HelloTriangle app(windowHandle, windowWidth, windowHeight, vsync, gpuIndex);
 
 	auto eventDelegates = std::make_unique<SampleEventDelegates>(client, &app);
 	client->RegisterEventDelegates(eventDelegates.get());
@@ -1231,6 +1261,9 @@ int HelloTriangleMain()
 				break;
 			}
 		}
+		// Add sleep if requested
+		if (sleepMs > 0)
+			std::this_thread::sleep_for(std::chrono::milliseconds(sleepMs));
 		if (std::optional<uint64_t> processedFrameNum = app.Render())
 		{
 			flatbuffers::FlatBufferBuilder fbb;
@@ -1252,9 +1285,35 @@ int HelloTriangleMain()
 	return 0;
 }
 
-int main()
+int main(int argc, char** argv)
 {
-	auto ret = HelloTriangleMain();
+	uint64_t sleepMs = 0;
+	std::optional<uint32_t> gpuIndex;
+	int windowWidth = 1280;
+	int windowHeight = 720;
+	bool vsync = true;
+
+	if (argc > 1)
+	{
+		for (int i = 1; i < argc; i++)
+		{
+			if (strcmp(argv[i], "--render-loop-sleep-ms") == 0 && i + 1 < argc)
+				sleepMs = std::atoi(argv[++i]);
+			else if (strcmp(argv[i], "--gpu") == 0 && i + 1 < argc)
+				gpuIndex = std::atoi(argv[++i]);
+			else if (strcmp(argv[i], "--width") == 0 && i + 1 < argc)
+				windowWidth = std::atoi(argv[++i]);
+			else if (strcmp(argv[i], "--height") == 0 && i + 1 < argc)
+				windowHeight = std::atoi(argv[++i]);
+			else if (strcmp(argv[i], "--no-vsync") == 0)
+				vsync = false;
+			else
+				std::cerr << "Unknown argument: " << argv[i] << std::endl;
+		}
+	}
+
+	// Pass parameters to HelloTriangleMain
+	auto ret = HelloTriangleMain(windowWidth, windowHeight, gpuIndex, sleepMs, vsync);
 
 #ifdef DX12_ENABLE_DEBUG_LAYER
 	if (ComPtr<IDXGIDebug1> pDebug = nullptr; SUCCEEDED(DXGIGetDebugInterface1(0, IID_PPV_ARGS(&pDebug))))

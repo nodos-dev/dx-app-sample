@@ -34,7 +34,7 @@ if (DEFINED NODOS_WORKSPACE_DIR)
     set(NOSMAN_WORKSPACE_DIR ${NODOS_WORKSPACE_DIR})
     set(NOSMAN_EXECUTABLE ${NODOS_WORKSPACE_DIR}/nodos${CMAKE_EXECUTABLE_SUFFIX})
     cmake_path(SET NOSMAN_EXECUTABLE ${NOSMAN_EXECUTABLE} NORMALIZE)
-    execute_process(COMMAND ${NOSMAN_EXECUTABLE} --workspace "${NODOS_WORKSPACE_DIR}" sdk-info "17.2.0" "process" OUTPUT_VARIABLE NOSMAN_SDK_INFO)
+    execute_process(COMMAND ${NOSMAN_EXECUTABLE} --workspace "${NODOS_WORKSPACE_DIR}" sdk-info "18.0" "process" OUTPUT_VARIABLE NOSMAN_SDK_INFO)
     string(JSON NODOS_SDK_DIR GET ${NOSMAN_SDK_INFO} "path")
     string(STRIP ${NODOS_SDK_DIR} NODOS_SDK_DIR)
     set(NODOS_SDK_DIR ${NODOS_SDK_DIR} CACHE PATH "Path to Nodos SDK")
@@ -53,7 +53,7 @@ include(${NODOS_WORKSPACE_DIR}/Toolchain/CMake/Scripts/Utils.cmake)
 include(${NODOS_WORKSPACE_DIR}/Toolchain/CMake/Scripts/Projects.cmake)
 
 # Get nos.sys.vulkan
-nos_get_module("nos.sys.vulkan" "5.8" NOS_SYS_VULKAN_TARGET)
+nos_get_module("nos.sys.vulkan" "6.0" NOS_SYS_VULKAN_TARGET)
 message(STATUS "nos.sys.vulkan target: ${NOS_SYS_VULKAN_TARGET}")
 
 add_library(nosAppSDK INTERFACE)
