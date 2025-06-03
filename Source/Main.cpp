@@ -1187,6 +1187,76 @@ bool FileExists(const std::string& path) {
 	return f.good();
 }
 
+// Helper to run a command and capture its stdout (replaces _popen)
+std::string RunCommandAndCapture(const std::string& cmd) {
+    HANDLE hRead, hWrite;
+    SECURITY_ATTRIBUTES sa = { sizeof(SECURITY_ATTRIBUTES), NULL, TRUE };
+    if (!CreatePipe(&hRead, &hWrite, &sa, 0)) return "";
+
+    STARTUPINFOA si = { sizeof(STARTUPINFOA) };
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = hWrite;
+    si.hStdError = hWrite;
+    si.hStdInput = NULL;
+
+    PROCESS_INFORMATION pi = {};
+    // CreateProcessA needs a modifiable buffer
+    std::vector<char> cmdline(cmd.begin(), cmd.end());
+    cmdline.push_back('\0');
+
+    BOOL success = CreateProcessA(
+        NULL, cmdline.data(), NULL, NULL, TRUE,
+        CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
+
+    CloseHandle(hWrite); // Parent doesn't need write end
+
+    std::string output;
+    if (success) {
+        char buffer[256];
+        DWORD read;
+        while (ReadFile(hRead, buffer, sizeof(buffer) - 1, &read, NULL) && read > 0) {
+            buffer[read] = '\0';
+            output += buffer;
+        }
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+    }
+    CloseHandle(hRead);
+    return output;
+}
+
+// Helper to run nodos.exe and get SDK path from JSON output (manual parsing, no JSON lib)
+std::string GetSdkPathFromNosman(const std::string& bundleRoot, const std::string& appSdkVersion) {
+	std::string sdkPath;
+	std::string nodosExe = bundleRoot + "\\nodos.exe";
+	if (!FileExists(nodosExe)) 
+		return sdkPath;
+
+	std::string cmd = "\"" + nodosExe + "\" --workspace \"" + bundleRoot + "\" sdk-info \"" + appSdkVersion + "\" process";
+	std::string jsonStr = RunCommandAndCapture(cmd);
+	if (jsonStr.empty())
+		return sdkPath;
+
+	const char* key = "\"path\"";
+	size_t keyPos = jsonStr.find(key);
+	if (keyPos != std::string::npos) {
+		size_t colon = jsonStr.find(':', keyPos);
+		if (colon != std::string::npos) {
+			size_t firstQuote = jsonStr.find('"', colon + 1);
+			if (firstQuote != std::string::npos) {
+				size_t secondQuote = jsonStr.find('"', firstQuote + 1);
+				if (secondQuote != std::string::npos) {
+					sdkPath = jsonStr.substr(firstQuote + 1, secondQuote - firstQuote - 1);
+				}
+			}
+		}
+	}
+	if (sdkPath.empty())
+		std::cerr << "Failed to parse SDK path from command output." << std::endl;
+	return sdkPath;
+}
+
 int HelloTriangleMain(
 	int windowWidth,
 	int windowHeight,
@@ -1329,6 +1399,22 @@ int main(int argc, char** argv)
 	std::filesystem::path exeDir = std::filesystem::absolute(exePath).parent_path();
 	std::filesystem::path sdkDllCandidate = exeDir / "nosAppSDK.dll";
 	nodosSdkDllPath = sdkDllCandidate.string();
+
+	// Try to find nosAppSDK.dll using nodos.exe if still not found
+	if (nodosSdkDllPath.empty() || !FileExists(nodosSdkDllPath)) {
+		// Try to find bundle root (assume two levels up from exeDir: Samples/nos.sample.dxapp/<version>/Binaries)
+		std::filesystem::path bundleRoot = exeDir;
+		for (int i = 0; i < 4; ++i)
+			bundleRoot = bundleRoot.parent_path();
+		// Use App SDK version, not engine version
+		std::string appSdkVersion = "18.0"; // use correct App SDK version
+		std::string sdkPath = GetSdkPathFromNosman(bundleRoot.string(), appSdkVersion);
+		if (!sdkPath.empty()) {
+			std::string candidate = sdkPath + "\\bin\\nosAppSDK.dll";
+			if (FileExists(candidate))
+				nodosSdkDllPath = candidate;
+		}
+	}
 
 	if (nodosSdkDllPath.empty() || !FileExists(nodosSdkDllPath)){
 		const char* sdkDir = std::getenv("NODOS_SDK_DIR");
