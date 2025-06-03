@@ -65,3 +65,11 @@ add_executable(NosDxAppSample ${SOURCES})
 target_include_directories(NosDxAppSample PRIVATE Source)
 target_link_libraries(NosDxAppSample PRIVATE nosAppSDK ${NOS_SYS_VULKAN_TARGET} d3d12 dxgi d3dcompiler SDL2-static DirectX-Headers Shlwapi.lib)
 target_compile_definitions(NosDxAppSample PRIVATE NODOS_APP_SDK_DLL="${NODOS_SDK_DIR}/bin/nosAppSDK.dll")
+set_target_properties(NosDxAppSample PROPERTIES
+    PREFIX ""
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/Binaries"
+    RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_CURRENT_SOURCE_DIR}/Binaries"
+    RUNTIME_OUTPUT_DIRECTORY_RELEASE "${CMAKE_CURRENT_SOURCE_DIR}/Binaries"
+    RUNTIME_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_CURRENT_SOURCE_DIR}/Binaries"
+    RUNTIME_OUTPUT_DIRECTORY_MINSIZEREL "${CMAKE_CURRENT_SOURCE_DIR}/Binaries"
+)

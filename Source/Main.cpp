@@ -20,6 +20,7 @@ using Microsoft::WRL::ComPtr;
 #include <iostream>
 #include <filesystem>
 #include <thread>
+#include <fstream>
 
 // Nodos
 #include "CommonEvents_generated.h"
@@ -1180,12 +1181,19 @@ struct SampleEventDelegates : nos::app::IEventDelegates
 	}
 };
 
+// Utility to check if a file exists
+bool FileExists(const std::string& path) {
+	std::ifstream f(path.c_str());
+	return f.good();
+}
+
 int HelloTriangleMain(
 	int windowWidth,
 	int windowHeight,
 	std::optional<uint32_t> gpuIndex,
 	uint64_t sleepMs,
-	bool vsync
+	bool vsync,
+	const std::string& nodosSdkDllPath // new parameter
 )
 {
 	SDL_WindowFlags window_flags =
@@ -1214,8 +1222,9 @@ int HelloTriangleMain(
 	nos::app::FN_MakeAppServiceClient* pfnMakeAppServiceClient = nullptr;
 	nos::app::FN_ShutdownClient* pfnShutdownClient = nullptr;
 
-	HMODULE sdkModule = LoadLibrary(NODOS_APP_SDK_DLL);
-	Must(sdkModule, "Failed to load Nodos SDK DLL");
+	std::cout << "Using Nodos SDK DLL at: " << nodosSdkDllPath << std::endl;
+	HMODULE sdkModule = LoadLibraryA(nodosSdkDllPath.c_str());
+	Must(sdkModule, ("Failed to load Nodos SDK DLL: " + nodosSdkDllPath).c_str());
 	pfnCheckSDKCompatibility = (nos::app::FN_CheckSDKCompatibility*)GetProcAddress(
 		sdkModule, "CheckSDKCompatibility");
 	pfnMakeAppServiceClient = (nos::app::FN_MakeAppServiceClient*)GetProcAddress(sdkModule, "MakeAppServiceClient");
@@ -1292,6 +1301,7 @@ int main(int argc, char** argv)
 	int windowWidth = 1280;
 	int windowHeight = 720;
 	bool vsync = true;
+	std::string nodosSdkDllPath;
 
 	if (argc > 1)
 	{
@@ -1307,13 +1317,43 @@ int main(int argc, char** argv)
 				windowHeight = std::atoi(argv[++i]);
 			else if (strcmp(argv[i], "--no-vsync") == 0)
 				vsync = false;
+			else if (strcmp(argv[i], "--nodos-sdk-dll") == 0 && i + 1 < argc)
+				nodosSdkDllPath = argv[++i];
 			else
 				std::cerr << "Unknown argument: " << argv[i] << std::endl;
 		}
 	}
 
+	if (nodosSdkDllPath.empty() || !FileExists(nodosSdkDllPath)){
+		const char* sdkDir = std::getenv("NODOS_SDK_DIR");
+		if (sdkDir) {
+			std::string candidate = std::string(sdkDir) + "/bin/nosAppSDK.dll";
+			if (FileExists(candidate)) {
+				nodosSdkDllPath = candidate;
+			}
+		}
+	}
+
+#ifdef NODOS_APP_SDK_DLL
+	if (nodosSdkDllPath.empty() || !FileExists(nodosSdkDllPath)) {
+		const char* macroPath = NODOS_APP_SDK_DLL;
+		if (macroPath && FileExists(macroPath)) {
+			nodosSdkDllPath = macroPath;
+		}
+	}
+#endif
+
+	while (nodosSdkDllPath.empty() || !FileExists(nodosSdkDllPath)) {
+		std::cout << "Enter path to Nodos SDK DLL: ";
+		std::getline(std::cin, nodosSdkDllPath);
+		if (!FileExists(nodosSdkDllPath)) {
+			std::cout << "File does not exist: " << nodosSdkDllPath << std::endl;
+			nodosSdkDllPath.clear();
+		}
+	}
+
 	// Pass parameters to HelloTriangleMain
-	auto ret = HelloTriangleMain(windowWidth, windowHeight, gpuIndex, sleepMs, vsync);
+	auto ret = HelloTriangleMain(windowWidth, windowHeight, gpuIndex, sleepMs, vsync, nodosSdkDllPath);
 
 #ifdef DX12_ENABLE_DEBUG_LAYER
 	if (ComPtr<IDXGIDebug1> pDebug = nullptr; SUCCEEDED(DXGIGetDebugInterface1(0, IID_PPV_ARGS(&pDebug))))
