@@ -197,12 +197,15 @@ struct HelloTriangle
 		Must(!adapters.empty(), "No suitable adapter found.");
 
 		uint32_t selectedAdapter = 0;
-		if (gpuIndex)
-			selectedAdapter = *gpuIndex;
-		else
+		if (adapters.size() > 1)
 		{
-			std::cout << "Select GPU: ";
-			std::cin >> selectedAdapter;
+			if (gpuIndex)
+				selectedAdapter = *gpuIndex;
+			else
+			{
+				std::cout << "Select GPU: ";
+				std::cin >> selectedAdapter;
+			}
 		}
 
 		std::wcout << "Selected GPU: " << selectedAdapter << std::endl;
