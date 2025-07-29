@@ -26,6 +26,7 @@ using Microsoft::WRL::ComPtr;
 #include "CommonEvents_generated.h"
 #include <nosFlatBuffersCommon.h>
 #include <Nodos/AppAPI.h>
+#include <Nodos/AppHelpers.hpp>
 #include <nosVulkanSubsystem/Types_generated.h>
 #include <nosVulkanSubsystem/nosVulkanSubsystem.h>
 
@@ -1025,13 +1026,13 @@ struct HelloTriangle
 	}
 };
 
-struct SampleEventDelegates : nos::app::IEventDelegates
+struct SampleEventDelegates : nos::app::AppEventDelegates
 {
-	SampleEventDelegates(nos::app::IAppServiceClient* client, HelloTriangle* app) : Client(client), App(app)
+	SampleEventDelegates(nosAppServiceClient* client, HelloTriangle* app) : Client(client), App(app)
 	{
 	}
 
-	nos::app::IAppServiceClient* Client;
+	nosAppServiceClient* Client;
 	HelloTriangle* App;
 	nos::fb::UUID NodeId{};
 
@@ -1045,7 +1046,7 @@ struct SampleEventDelegates : nos::app::IEventDelegates
 		mb.Finish(offset);
 		auto buf = mb.Release();
 		auto root = flatbuffers::GetRoot<nos::app::AppEvent>(buf.data());
-		Client->Send(*root);
+		Client->Send(Client->ServiceHandle, root);
 	}
 
 	void OnAppConnected(const nos::fb::Node* appNode)
@@ -1067,16 +1068,16 @@ struct SampleEventDelegates : nos::app::IEventDelegates
 		std::vector<uint8_t> outputPinBuf = nos::Buffer::From(outputTexDef);
 		std::vector pins = {
 			nos::fb::CreatePinDirect(fbb, &inPinId, "Input", "nos.sys.vulkan.Texture", nos::fb::ShowAs::INPUT_PIN,
-									 nos::fb::CanShowAs::INPUT_PIN_ONLY, 0, 0, &inputPinBuf),
+									 nos::fb::CanShowAs::INPUT_PIN_ONLY, 0, &inputPinBuf),
 			nos::fb::CreatePinDirect(fbb, &outPinId, "Output", "nos.sys.vulkan.Texture", nos::fb::ShowAs::OUTPUT_PIN,
-									 nos::fb::CanShowAs::OUTPUT_PIN_ONLY, 0, 0, &outputPinBuf)
+									 nos::fb::CanShowAs::OUTPUT_PIN_ONLY, 0, &outputPinBuf)
 		};
 		fbb.Finish(nos::CreatePartialNodeUpdateDirect(fbb, &NodeId,
 													  nos::ClearFlags::CLEAR_PINS | nos::ClearFlags::CLEAR_NODES,
 													  0, &pins, 0, 0, 0, 0, 0, 0, 0,
 													  nos::fb::CreateNodeOrphanStateDirect(fbb, nos::fb::NodeOrphanStateType::ACTIVE, "")));
 		nos::Buffer update = fbb.Release();
-		Client->SendPartialNodeUpdate(*update.As<nos::PartialNodeUpdate>());
+		Client->SendPartialNodeUpdate(Client->ServiceHandle, update.As<nos::PartialNodeUpdate>());
 	}
 
 	nos::sys::vulkan::TTexture ExportSharedTexture(HANDLE handle, ID3D12Resource* texture)
@@ -1291,47 +1292,46 @@ int HelloTriangleMain(
 	windowHandle = wmInfo.info.win.window;
 
 	// Initialize Nodos SDK
-	nos::app::FN_CheckSDKCompatibility* pfnCheckSDKCompatibility = nullptr;
-	nos::app::FN_MakeAppServiceClient* pfnMakeAppServiceClient = nullptr;
-	nos::app::FN_ShutdownClient* pfnShutdownClient = nullptr;
+	FN_CheckSDKCompatibility pfnCheckSDKCompatibility = nullptr;
+	FN_MakeAppServiceClient pfnMakeAppServiceClient = nullptr;
+	FN_ShutdownClient pfnShutdownClient = nullptr;
 
 	std::cout << "Using Nodos SDK DLL at: " << nodosSdkDllPath << std::endl;
 	HMODULE sdkModule = LoadLibraryA(nodosSdkDllPath.c_str());
 	Must(sdkModule, ("Failed to load Nodos SDK DLL: " + nodosSdkDllPath).c_str());
-	pfnCheckSDKCompatibility = (nos::app::FN_CheckSDKCompatibility*)GetProcAddress(
+	pfnCheckSDKCompatibility = (FN_CheckSDKCompatibility)GetProcAddress(
 		sdkModule, "CheckSDKCompatibility");
-	pfnMakeAppServiceClient = (nos::app::FN_MakeAppServiceClient*)GetProcAddress(sdkModule, "MakeAppServiceClient");
-	pfnShutdownClient = (nos::app::FN_ShutdownClient*)GetProcAddress(sdkModule, "ShutdownClient");
+	pfnMakeAppServiceClient = (FN_MakeAppServiceClient)GetProcAddress(sdkModule, "MakeAppServiceClient");
+	pfnShutdownClient = (FN_ShutdownClient)GetProcAddress(sdkModule, "ShutdownClient");
 
 	Must(pfnCheckSDKCompatibility && pfnMakeAppServiceClient && pfnShutdownClient, "Failed to load Nodos SDK functions");
 
 	Must(pfnCheckSDKCompatibility(NOS_APPLICATION_SDK_VERSION_MAJOR, NOS_APPLICATION_SDK_VERSION_MINOR,
 		NOS_APPLICATION_SDK_VERSION_PATCH), "Incompatible Nodos SDK version");
 
-	nos::app::IAppServiceClient* client = pfnMakeAppServiceClient("localhost:50053",
-		nos::app::ApplicationInfo {
-			.AppKey = "Sample-DX12-App",
-			.AppName = "Sample DX12 App"
-		}
-	);
+	nosApplicationInfo appInfo{
+		.AppKey = "Sample-DX12-App",
+		.AppName = "Sample DX12 App"
+	};
+	nosAppServiceClient* client = pfnMakeAppServiceClient("localhost:50053", &appInfo);
 
 	Must(client, "Failed to create App Service Client");
 
 	HelloTriangle app(windowHandle, windowWidth, windowHeight, vsync, gpuIndex);
 
 	auto eventDelegates = std::make_unique<SampleEventDelegates>(client, &app);
-	client->RegisterEventDelegates(eventDelegates.get());
+	client->RegisterEventDelegates(client->ServiceHandle, &eventDelegates.get()->Delegates);
 
 	// Main loop
 	SDL_Event event;
 	bool running = true;
 	while (running)
 	{
-		while (!client->IsConnected())
+		while (!client->IsConnected(client->ServiceHandle))
 		{
 			std::cout << "Trying to connect to Nodos..." << std::endl;
-			client->TryConnect();
-			if (!client->IsConnected())
+			client->TryConnect(client->ServiceHandle);
+			if (!client->IsConnected(client->ServiceHandle))
 				std::this_thread::sleep_for(std::chrono::milliseconds(500));
 		}
 		SDL_PumpEvents();
@@ -1349,7 +1349,7 @@ int HelloTriangleMain(
 		if (std::optional<uint64_t> processedFrameNum = app.Render())
 		{
 			flatbuffers::FlatBufferBuilder fbb;
-			client->Send(nos::CreateAppEvent(fbb, nos::app::CreateExecutionCompleted(fbb, &eventDelegates->NodeId, *processedFrameNum)));
+			client->Send(client->ServiceHandle, nos::CreateAppEvent(fbb, nos::app::CreateExecutionCompleted(fbb, &eventDelegates->NodeId, *processedFrameNum)));
 		}
 	}
 
@@ -1360,8 +1360,8 @@ int HelloTriangleMain(
 
 	uint64_t frameCounter = app.FrameCounter;
 	flatbuffers::FlatBufferBuilder fbb;
-	client->Send(nos::CreateAppEvent(fbb, nos::app::CreateAppConnectionClosed(fbb, frameCounter)));
-	client->UnregisterEventDelegates();
+	client->Send(client->ServiceHandle, nos::CreateAppEvent(fbb, nos::app::CreateAppConnectionClosed(fbb, frameCounter)));
+	client->UnregisterEventDelegates(client->ServiceHandle);
 	pfnShutdownClient(client);
 
 	return 0;
