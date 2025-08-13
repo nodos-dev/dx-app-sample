@@ -2,7 +2,7 @@
 	"info": {
 		"id": {
 			"name": "nos.sample.dxapp",
-			"version": "1.1.4"
+			"version": "1.1.5"
 		},
 		"description": "Sample application using DirectX12 that connects to Nodos",
 		"display_name": "DirectX App Sample",
