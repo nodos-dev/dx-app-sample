@@ -3,6 +3,7 @@
         "Source/**",
         "Binaries/*.exe",
         "CMakeLists.txt",
-        "README.md"
+        "README.md",
+        "*.nospackage"
     ]
 }
