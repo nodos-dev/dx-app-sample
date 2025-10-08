@@ -3,7 +3,6 @@
 cmake_minimum_required(VERSION 3.14) # Required for FetchContent
 
 project(NosDxAppSample)
-
 include(FetchContent)
 
 # SDL2 (Minimal setup)
@@ -48,7 +47,7 @@ if (DEFINED NODOS_WORKSPACE_DIR)
     set(NOSMAN_EXECUTABLE ${NODOS_WORKSPACE_DIR}/nodos${CMAKE_EXECUTABLE_SUFFIX})
     cmake_path(SET NOSMAN_EXECUTABLE ${NOSMAN_EXECUTABLE} NORMALIZE)
     execute_process(
-        COMMAND ${NOSMAN_EXECUTABLE} --workspace "${NODOS_WORKSPACE_DIR}" sdk-info "18.0" "process"
+        COMMAND ${NOSMAN_EXECUTABLE} --workspace "${NODOS_WORKSPACE_DIR}" sdk-info "18.4" "process"
         OUTPUT_VARIABLE NOSMAN_SDK_INFO
     )
     string(JSON NODOS_SDK_DIR GET ${NOSMAN_SDK_INFO} "path")

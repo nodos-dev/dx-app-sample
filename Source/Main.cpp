@@ -1048,11 +1048,9 @@ struct SampleEventDelegates : nos::app::IEventDelegates
 		Client->Send(*root);
 	}
 
-	void OnAppConnected(const nos::fb::Node* appNode)
+	void OnAppConnected()
 	{
 		std::cout << "Connected to Nodos" << std::endl;
-		if (appNode)
-			OnNodeImported(*appNode);
 	}
 
 	void OnNodeImported(nos::fb::Node const& appNode)
@@ -1108,11 +1106,6 @@ struct SampleEventDelegates : nos::app::IEventDelegates
 		return id;
 	}
 
-	void OnNodeUpdated(nos::fb::Node const& appNode)
-	{
-		OnNodeImported(appNode);
-	}
-
 	void OnStateChanged(nos::app::ExecutionState newState)
 	{
 		App->UpdateSyncState_GrpcThread(newState);
@@ -1146,11 +1139,7 @@ struct SampleEventDelegates : nos::app::IEventDelegates
 		switch (event->event_type())
 		{
 		case EngineEventUnion::AppConnectedEvent: {
-			OnAppConnected(event->event_as<AppConnectedEvent>()->node());
-			break;
-		}
-		case EngineEventUnion::FullNodeUpdate: {
-			OnNodeUpdated(*event->event_as<nos::FullNodeUpdate>()->node());
+			OnAppConnected();
 			break;
 		}
 		case EngineEventUnion::NodeImported: {
@@ -1410,7 +1399,7 @@ int main(int argc, char** argv)
 		for (int i = 0; i < 4; ++i)
 			bundleRoot = bundleRoot.parent_path();
 		// Use App SDK version, not engine version
-		std::string appSdkVersion = "18.0"; // use correct App SDK version
+		std::string appSdkVersion = "18.4"; // use correct App SDK version
 		std::string sdkPath = GetSdkPathFromNosman(bundleRoot.string(), appSdkVersion);
 		if (!sdkPath.empty()) {
 			std::string candidate = sdkPath + "\\bin\\nosAppSDK.dll";
