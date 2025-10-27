@@ -1407,13 +1407,13 @@ int main(int argc, char** argv)
 	if (nodosSdkDllPath.empty() || !FileExists(nodosSdkDllPath)) {
 		// Try to find bundle root (assume two levels up from exeDir: Samples/nos.sample.dxapp/<version>/Binaries)
 		std::filesystem::path bundleRoot = exeDir;
-		for (int i = 0; i < 4; ++i)
+		for (int i = 0; i < 3; ++i)
 			bundleRoot = bundleRoot.parent_path();
 		// Use App SDK version, not engine version
-		std::string appSdkVersion = "18.0"; // use correct App SDK version
+		std::string appSdkVersion = "20.0"; // use correct App SDK version
 		std::string sdkPath = GetSdkPathFromNosman(bundleRoot.string(), appSdkVersion);
 		if (!sdkPath.empty()) {
-			std::string candidate = sdkPath + "\\bin\\nosAppSDK.dll";
+			std::string candidate = sdkPath + "\\Binaries\\nosAppSDK.dll";
 			if (FileExists(candidate))
 				nodosSdkDllPath = candidate;
 		}
