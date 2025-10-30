@@ -28,6 +28,7 @@ using Microsoft::WRL::ComPtr;
 #include <Nodos/AppAPI.h>
 #include <Nodos/AppHelpers.hpp>
 #include <nosVulkanSubsystem/Types_generated.h>
+#include <nosVulkanSubsystem/ResourceShare_generated.h>
 #include <nosVulkanSubsystem/nosVulkanSubsystem.h>
 
 #define DX12_ENABLE_DEBUG_LAYER
@@ -1040,13 +1041,32 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 	{
 		uint64_t inputSemaphore = (uint64_t)App->Shared.Input.FenceHandle;
 		uint64_t outputSemaphore = (uint64_t)App->Shared.Output.FenceHandle;
+		auto syncSem = nos::sys::vulkan::TSetInputOutputSyncSemaphores{};
+		syncSem.pid = _getpid();
+		syncSem.input_semaphore = inputSemaphore;
+		syncSem.output_semaphore = outputSemaphore;
+		nos::sys::vulkan::TResourceShareMessage msg;
+		msg.message.Set(std::move(syncSem));
+		std::vector<uint8_t> syncSemaphoresMsgBuf = nos::Buffer::From(msg);
 		flatbuffers::FlatBufferBuilder mb;
 		auto offset = nos::CreateAppEventOffset(
-			mb, nos::app::CreateSetSyncSemaphores(mb, &NodeId, _getpid(), inputSemaphore, outputSemaphore));
+			mb, nos::app::CreateCustomMessageDirect(mb, "nos.sys.vulkan", "nos.sys.vulkan.ResourceShareMessage", &syncSemaphoresMsgBuf));
 		mb.Finish(offset);
 		auto buf = mb.Release();
 		auto root = flatbuffers::GetRoot<nos::app::AppEvent>(buf.data());
 		Client->Send(Client->ServiceHandle, root);
+	}
+
+	void ImportResource(nos::fb::UUID const& pinId, nos::sys::vulkan::TTexture tex)
+	{
+		flatbuffers::FlatBufferBuilder fbb;
+		nos::sys::vulkan::TImportResource importResource;
+		importResource.pin_id = std::make_unique<nos::fb::UUID>(pinId);
+		importResource.external_resource.Set(std::move(tex));
+		nos::sys::vulkan::TResourceShareMessage msg;
+		msg.message.Set(std::move(importResource));
+		std::vector<uint8_t> importResourceMsgBuf = nos::Buffer::From(msg);
+		Client->Send(Client->ServiceHandle, nos::CreateAppEvent(fbb, nos::app::CreateCustomMessageDirect(fbb, "nos.sys.vulkan", "nos.sys.vulkan.ResourceShareMessage", &importResourceMsgBuf)));
 	}
 
 	void OnAppConnected(const nos::fb::Node* appNode)
@@ -1064,13 +1084,12 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 		flatbuffers::FlatBufferBuilder fbb;
 		auto inPinId = GenerateId();
 		auto outPinId = GenerateId();
-		std::vector<uint8_t> inputPinBuf = nos::Buffer::From(inputTexDef);
-		std::vector<uint8_t> outputPinBuf = nos::Buffer::From(outputTexDef);
+		std::vector<uint8_t> emptyTexPinBuf = nos::Buffer::From(nos::sys::vulkan::TTexture{});
 		std::vector pins = {
 			nos::fb::CreatePinDirect(fbb, &inPinId, "Input", "nos.sys.vulkan.Texture", nos::fb::ShowAs::INPUT_PIN,
-									 nos::fb::CanShowAs::INPUT_PIN_ONLY, 0, &inputPinBuf),
+									 nos::fb::CanShowAs::INPUT_PIN_ONLY, 0, &emptyTexPinBuf),
 			nos::fb::CreatePinDirect(fbb, &outPinId, "Output", "nos.sys.vulkan.Texture", nos::fb::ShowAs::OUTPUT_PIN,
-									 nos::fb::CanShowAs::OUTPUT_PIN_ONLY, 0, &outputPinBuf)
+									 nos::fb::CanShowAs::OUTPUT_PIN_ONLY, 0, &emptyTexPinBuf)
 		};
 		fbb.Finish(nos::CreatePartialNodeUpdateDirect(fbb, &NodeId,
 													  nos::ClearFlags::CLEAR_PINS | nos::ClearFlags::CLEAR_NODES,
@@ -1078,6 +1097,9 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 													  nos::fb::CreateNodeOrphanStateDirect(fbb, nos::fb::NodeOrphanStateType::ACTIVE, "")));
 		nos::Buffer update = fbb.Release();
 		Client->SendPartialNodeUpdate(Client->ServiceHandle, update.As<nos::PartialNodeUpdate>());
+
+		ImportResource(inPinId, inputTexDef);
+		ImportResource(outPinId, outputTexDef);
 	}
 
 	nos::sys::vulkan::TTexture ExportSharedTexture(HANDLE handle, ID3D12Resource* texture)
@@ -1093,9 +1115,6 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 		D3D12_RESOURCE_DESC desc = texture->GetDesc();
 		ext.mutate_allocation_size(App->Device->GetResourceAllocationInfo(0, 1, &desc).SizeInBytes);
 		ext.mutate_pid(_getpid());
-		def.unmanaged = false;
-		def.unscaled = true;
-		def.handle = 0;
 		return def;
 	}
 

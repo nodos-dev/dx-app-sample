@@ -69,7 +69,7 @@ include(${NODOS_WORKSPACE_DIR}/Toolchain/CMake/Scripts/Utils.cmake)
 include(${NODOS_WORKSPACE_DIR}/Toolchain/CMake/Scripts/Projects.cmake)
 
 # Get nos.sys.vulkan
-nos_get_module("nos.sys.vulkan" "6.0" NOS_SYS_VULKAN_TARGET)
+nos_get_module("nos.sys.vulkan" "8.0" NOS_SYS_VULKAN_TARGET)
 message(STATUS "nos.sys.vulkan target: ${NOS_SYS_VULKAN_TARGET}")
 
 add_library(nosAppSDK INTERFACE)
