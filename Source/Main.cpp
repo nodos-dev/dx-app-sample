@@ -1041,7 +1041,7 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 	{
 		uint64_t inputSemaphore = (uint64_t)App->Shared.Input.FenceHandle;
 		uint64_t outputSemaphore = (uint64_t)App->Shared.Output.FenceHandle;
-		auto syncSem = nos::sys::vulkan::TSetInputOutputSyncSemaphores{};
+		nos::sys::vulkan::TSetInputOutputSyncSemaphores syncSem;
 		syncSem.pid = _getpid();
 		syncSem.input_semaphore = inputSemaphore;
 		syncSem.output_semaphore = outputSemaphore;
