@@ -1081,25 +1081,47 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 		NodeId = *appNode.id();
 		auto inputTexDef = ExportSharedTexture(App->Shared.Input.TextureHandle, App->Shared.Input.Texture.Get());
 		auto outputTexDef = ExportSharedTexture(App->Shared.Output.TextureHandle, App->Shared.Output.Texture.Get());
-		flatbuffers::FlatBufferBuilder fbb;
-		auto inPinId = GenerateId();
-		auto outPinId = GenerateId();
-		std::vector<uint8_t> emptyTexPinBuf = nos::Buffer::From(nos::sys::vulkan::TTexture{});
-		std::vector pins = {
-			nos::fb::CreatePinDirect(fbb, &inPinId, "Input", "nos.sys.vulkan.Texture", nos::fb::ShowAs::INPUT_PIN,
-									 nos::fb::CanShowAs::INPUT_PIN_ONLY, 0, &emptyTexPinBuf),
-			nos::fb::CreatePinDirect(fbb, &outPinId, "Output", "nos.sys.vulkan.Texture", nos::fb::ShowAs::OUTPUT_PIN,
-									 nos::fb::CanShowAs::OUTPUT_PIN_ONLY, 0, &emptyTexPinBuf)
-		};
-		fbb.Finish(nos::CreatePartialNodeUpdateDirect(fbb, &NodeId,
-													  nos::ClearFlags::CLEAR_PINS | nos::ClearFlags::CLEAR_NODES,
-													  0, &pins, 0, 0, 0, 0, 0, 0, 0,
-													  nos::fb::CreateNodeOrphanStateDirect(fbb, nos::fb::NodeOrphanStateType::ACTIVE, "")));
-		nos::Buffer update = fbb.Release();
-		Client->SendPartialNodeUpdate(Client->ServiceHandle, update.As<nos::PartialNodeUpdate>());
+		
+		std::optional<nos::fb::UUID> inPinId, outPinId;
+		
+		if (appNode.pins())
+		{
+			for (auto pin : *appNode.pins())
+			{
+				if (pin->show_as() == nos::fb::ShowAs::INPUT_PIN && strcmp(pin->name()->c_str(), "Input") == 0)
+					inPinId = *pin->id();
+				else if (pin->show_as() == nos::fb::ShowAs::OUTPUT_PIN && strcmp(pin->name()->c_str(), "Output") == 0)
+					outPinId = *pin->id();
+			}
+		}
+		
+		if (!inPinId || !outPinId)
+		{
+			flatbuffers::FlatBufferBuilder fbb;
+			std::vector<uint8_t> emptyTexPinBuf = nos::Buffer::From(nos::sys::vulkan::TTexture{});
+			std::vector<flatbuffers::Offset<nos::fb::Pin>> pins;
+			if (!inPinId)
+			{
+				inPinId = GenerateId();
+				pins.push_back(nos::fb::CreatePinDirect(fbb, &*inPinId, "Input", "nos.sys.vulkan.Texture", nos::fb::ShowAs::INPUT_PIN,
+														nos::fb::CanShowAs::INPUT_PIN_ONLY, 0, &emptyTexPinBuf));
+			}
+			if (!outPinId)
+			{
+				outPinId = GenerateId();
+				pins.push_back(nos::fb::CreatePinDirect(fbb, &*outPinId, "Output", "nos.sys.vulkan.Texture", nos::fb::ShowAs::OUTPUT_PIN,
+														nos::fb::CanShowAs::OUTPUT_PIN_ONLY, 0, &emptyTexPinBuf));
+			}
+			fbb.Finish(nos::CreatePartialNodeUpdateDirect(fbb, &NodeId,
+														  nos::ClearFlags::CLEAR_PINS | nos::ClearFlags::CLEAR_NODES,
+														  0, &pins, 0, 0, 0, 0, 0, 0, 0,
+														  nos::fb::CreateNodeOrphanStateDirect(fbb, nos::fb::NodeOrphanStateType::ACTIVE, "")));
+			nos::Buffer update = fbb.Release();
+			Client->SendPartialNodeUpdate(Client->ServiceHandle, update.As<nos::PartialNodeUpdate>());
+		}
 
-		ImportResource(inPinId, inputTexDef);
-		ImportResource(outPinId, outputTexDef);
+		ImportResource(*inPinId, inputTexDef);
+		ImportResource(*outPinId, outputTexDef);
 	}
 
 	nos::sys::vulkan::TTexture ExportSharedTexture(HANDLE handle, ID3D12Resource* texture)
@@ -1108,7 +1130,7 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 		def.width = 1280;
 		def.height = 720;
 		def.format = nos::sys::vulkan::Format::R8G8B8A8_UNORM;
-		def.usage = nos::sys::vulkan::ImageUsage::SAMPLED;
+		def.usage = nos::sys::vulkan::ImageUsage::SAMPLED | nos::sys::vulkan::ImageUsage::TRANSFER_SRC | nos::sys::vulkan::ImageUsage::TRANSFER_DST;
 		auto& ext = def.external_memory;
 		ext.mutate_handle_type(NOS_EXTERNAL_MEMORY_HANDLE_TYPE_D3D12_RESOURCE);
 		ext.mutate_handle((uint64_t)handle);
