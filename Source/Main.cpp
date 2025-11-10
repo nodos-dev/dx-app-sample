@@ -148,6 +148,12 @@ struct HelloTriangle
 
 	struct
 	{
+		nos::fb::UUID PinId{};
+		Vector2 Value = {0.0f, 0.0f};
+	} TrianglePositionPin;
+
+	struct
+	{
 		std::queue<std::function<void()>> Queue;
 		std::mutex Mutex;
 	} Tasks;
@@ -400,6 +406,11 @@ struct HelloTriangle
 		CD3DX12_DESCRIPTOR_RANGE1 range = CD3DX12_DESCRIPTOR_RANGE1(D3D12_DESCRIPTOR_RANGE_TYPE_SRV, 1, 0);
 		rootParam.InitAsDescriptorTable(1, &range);
 		rootParams.push_back(rootParam);
+		
+		// Add root constants for position offset (2 floats = 2 DWORDs)
+		CD3DX12_ROOT_PARAMETER1 positionParam = {};
+		positionParam.InitAsConstants(2, 0); // 2 32-bit values (vec2) at register b0
+		rootParams.push_back(positionParam);
 
 		CD3DX12_VERSIONED_ROOT_SIGNATURE_DESC rootSignatureDesc;
 		// Create a static sampler
@@ -428,6 +439,11 @@ struct HelloTriangle
 										 IID_PPV_ARGS(&MainPipeline.RootSignature)), "Unable to create root signature");
 
 		constexpr const char* vertexShaderSource = R"(
+			cbuffer PositionOffset : register(b0)
+			{
+				float2 positionOffset;
+			};
+			
 			struct VSInput
 			{
 				float3 position : POSITION;
@@ -441,7 +457,7 @@ struct HelloTriangle
 			VSOutput main(VSInput input)
 			{
 				VSOutput output;
-				output.position = float4(input.position, 1.0f);
+				output.position = float4(input.position.xy + positionOffset, input.position.z, 1.0f);
 				output.color = input.color;
 				return output;
 			}
@@ -963,6 +979,10 @@ struct HelloTriangle
 			CmdList->OMSetRenderTargets(1, &intermediateRTVHandle, FALSE, nullptr);
 
 			CmdList->SetGraphicsRootSignature(MainPipeline.RootSignature.Get());
+			
+			// Set position offset as root constants (index 1 in root signature)
+			float positionData[2] = { TrianglePositionPin.Value.x, TrianglePositionPin.Value.y };
+			CmdList->SetGraphicsRoot32BitConstants(1, 2, positionData, 0);
 
 			CmdList->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
 			CmdList->IASetVertexBuffers(0, 1, &MainPipeline.TriangleBufferView);
@@ -1082,7 +1102,7 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 		auto inputTexDef = ExportSharedTexture(App->Shared.Input.TextureHandle, App->Shared.Input.Texture.Get());
 		auto outputTexDef = ExportSharedTexture(App->Shared.Output.TextureHandle, App->Shared.Output.Texture.Get());
 		
-		std::optional<nos::fb::UUID> inPinId, outPinId;
+		std::optional<nos::fb::UUID> inPinId, outPinId, posPinId;
 		
 		if (appNode.pins())
 		{
@@ -1092,10 +1112,12 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 					inPinId = *pin->id();
 				else if (pin->show_as() == nos::fb::ShowAs::OUTPUT_PIN && strcmp(pin->name()->c_str(), "Output") == 0)
 					outPinId = *pin->id();
+				else if (pin->show_as() == nos::fb::ShowAs::INPUT_PIN && strcmp(pin->name()->c_str(), "TrianglePosition") == 0)
+					posPinId = *pin->id();
 			}
 		}
 		
-		if (!inPinId || !outPinId)
+		if (!inPinId || !outPinId || !posPinId)
 		{
 			flatbuffers::FlatBufferBuilder fbb;
 			std::vector<uint8_t> emptyTexPinBuf = nos::Buffer::From(nos::sys::vulkan::TTexture{});
@@ -1112,6 +1134,14 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 				pins.push_back(nos::fb::CreatePinDirect(fbb, &*outPinId, "Output", "nos.sys.vulkan.Texture", nos::fb::ShowAs::OUTPUT_PIN,
 														nos::fb::CanShowAs::OUTPUT_PIN_ONLY, 0, &emptyTexPinBuf));
 			}
+			if (!posPinId)
+			{
+				posPinId = GenerateId();
+				nos::fb::vec2 defaultPos = {0.0f, 0.0f};
+				std::vector<uint8_t> posPinBuf = nos::Buffer::From(defaultPos);
+				pins.push_back(nos::fb::CreatePinDirect(fbb, &*posPinId, "TrianglePosition", "nos.fb.vec2", nos::fb::ShowAs::INPUT_PIN,
+														nos::fb::CanShowAs::INPUT_PIN_ONLY, 0, &posPinBuf));
+			}
 			fbb.Finish(nos::CreatePartialNodeUpdateDirect(fbb, &NodeId,
 														  nos::ClearFlags::CLEAR_PINS | nos::ClearFlags::CLEAR_NODES,
 														  0, &pins, 0, 0, 0, 0, 0, 0, 0,
@@ -1119,6 +1149,8 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 			nos::Buffer update = fbb.Release();
 			Client->SendPartialNodeUpdate(Client->ServiceHandle, update.As<nos::PartialNodeUpdate>());
 		}
+
+		App->TrianglePositionPin.PinId = *posPinId;
 
 		ImportResource(*inPinId, inputTexDef);
 		ImportResource(*outPinId, outputTexDef);
@@ -1178,6 +1210,25 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 			App->NodosFrameNumber = std::nullopt;
 		else
 			App->NodosFrameNumber = appExecuteStart->frame_counter();
+		
+		// Process pin value updates
+		if (appExecuteStart->pin_value_updates())
+		{
+			for (auto* update : *appExecuteStart->pin_value_updates())
+			{
+				if (update->pin_id() && *update->pin_id() == App->TrianglePositionPin.PinId)
+				{
+					if (update->value() && update->value()->size() == sizeof(nos::fb::vec2))
+					{
+						auto* vec2Data = reinterpret_cast<const nos::fb::vec2*>(update->value()->data());
+						App->TrianglePositionPin.Value.x = vec2Data->x();
+						App->TrianglePositionPin.Value.y = vec2Data->y();
+						std::cout << "Position updated: (" << vec2Data->x() << ", " << vec2Data->y() << ")" << std::endl;
+					}
+				}
+			}
+		}
+		
 		std::cout << "Received ExecuteStart: " << appExecuteStart->frame_counter() << std::endl;
 		App->ExecutionCV.notify_all();
 	}
