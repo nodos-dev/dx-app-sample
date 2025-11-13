@@ -1049,11 +1049,11 @@ struct HelloTriangle
 
 struct SampleEventDelegates : nos::app::AppEventDelegates
 {
-	SampleEventDelegates(nosAppServiceClient* client, HelloTriangle* app) : Client(client), App(app)
+	SampleEventDelegates(nos::app::AppServiceClient& client, HelloTriangle* app) : Client(client), App(app)
 	{
 	}
 
-	nosAppServiceClient* Client;
+	nos::Ref<nos::app::AppServiceClient> Client;
 	HelloTriangle* App;
 	nos::fb::UUID NodeId{};
 
@@ -1074,7 +1074,7 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 		mb.Finish(offset);
 		auto buf = mb.Release();
 		auto root = flatbuffers::GetRoot<nos::app::AppEvent>(buf.data());
-		Client->Send(Client->ServiceHandle, root);
+		Client->Send(root);
 	}
 
 	void ImportResource(nos::fb::UUID const& pinId, nos::sys::vulkan::TTexture tex)
@@ -1086,14 +1086,12 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 		nos::sys::vulkan::TResourceShareMessage msg;
 		msg.message.Set(std::move(importResource));
 		std::vector<uint8_t> importResourceMsgBuf = nos::Buffer::From(msg);
-		Client->Send(Client->ServiceHandle, nos::CreateAppEvent(fbb, nos::app::CreateCustomMessageDirect(fbb, "nos.sys.vulkan", "nos.sys.vulkan.ResourceShareMessage", &importResourceMsgBuf)));
+		Client->Send(nos::CreateAppEvent(fbb, nos::app::CreateCustomMessageDirect(fbb, "nos.sys.vulkan", "nos.sys.vulkan.ResourceShareMessage", &importResourceMsgBuf)));
 	}
 
-	void OnAppConnected(const nos::fb::Node* appNode)
+	void OnAppConnected()
 	{
 		std::cout << "Connected to Nodos" << std::endl;
-		if (appNode)
-			OnNodeImported(*appNode);
 	}
 
 	void OnNodeImported(nos::fb::Node const& appNode)
@@ -1147,7 +1145,7 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 														  0, &pins, 0, 0, 0, 0, 0, 0, 0,
 														  nos::fb::CreateNodeOrphanStateDirect(fbb, nos::fb::NodeOrphanStateType::ACTIVE, "")));
 			nos::Buffer update = fbb.Release();
-			Client->SendPartialNodeUpdate(Client->ServiceHandle, update.As<nos::PartialNodeUpdate>());
+			Client->SendPartialNodeUpdate(update.As<nos::PartialNodeUpdate>());
 		}
 
 		App->TrianglePositionPin.PinId = *posPinId;
@@ -1180,11 +1178,6 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 			idBytes[i] = rand() % 256;
 		id.mutable_bytes()->CopyFromSpan(idBytes);
 		return id;
-	}
-
-	void OnNodeUpdated(nos::fb::Node const& appNode)
-	{
-		OnNodeImported(appNode);
 	}
 
 	void OnStateChanged(nos::app::ExecutionState newState)
@@ -1239,11 +1232,7 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 		switch (event->event_type())
 		{
 		case EngineEventUnion::AppConnectedEvent: {
-			OnAppConnected(event->event_as<AppConnectedEvent>()->node());
-			break;
-		}
-		case EngineEventUnion::FullNodeUpdate: {
-			OnNodeUpdated(*event->event_as<nos::FullNodeUpdate>()->node());
+			OnAppConnected();
 			break;
 		}
 		case EngineEventUnion::NodeImported: {
@@ -1384,46 +1373,58 @@ int HelloTriangleMain(
 	windowHandle = wmInfo.info.win.window;
 
 	// Initialize Nodos SDK
-	FN_CheckSDKCompatibility pfnCheckSDKCompatibility = nullptr;
-	FN_MakeAppServiceClient pfnMakeAppServiceClient = nullptr;
-	FN_ShutdownClient pfnShutdownClient = nullptr;
+	struct DXAppProcLoader : nos::app::AppApiProcLoader
+	{
+		DXAppProcLoader(HMODULE module) : ApiModule(module)
+		{
+		}
+		~DXAppProcLoader()
+		{
+			if (ApiModule)
+				::FreeLibrary(ApiModule);
+		}
+
+		ProcFuncPtr GetProcAddress(const char* name) const override
+		{
+			return (ProcFuncPtr)::GetProcAddress(ApiModule, name);
+		}
+		HMODULE ApiModule;
+	};
 
 	std::cout << "Using Nodos SDK DLL at: " << nodosSdkDllPath << std::endl;
 	HMODULE sdkModule = LoadLibraryA(nodosSdkDllPath.c_str());
 	Must(sdkModule, ("Failed to load Nodos SDK DLL: " + nodosSdkDllPath).c_str());
-	pfnCheckSDKCompatibility = (FN_CheckSDKCompatibility)GetProcAddress(
-		sdkModule, "CheckSDKCompatibility");
-	pfnMakeAppServiceClient = (FN_MakeAppServiceClient)GetProcAddress(sdkModule, "MakeAppServiceClient");
-	pfnShutdownClient = (FN_ShutdownClient)GetProcAddress(sdkModule, "ShutdownClient");
 
-	Must(pfnCheckSDKCompatibility && pfnMakeAppServiceClient && pfnShutdownClient, "Failed to load Nodos SDK functions");
+	std::shared_ptr<DXAppProcLoader> procLoader = std::make_shared<DXAppProcLoader>(sdkModule);
+	std::optional<nos::app::AppApi> appApi = nos::app::AppApi::Create(procLoader);
 
-	Must(pfnCheckSDKCompatibility(NOS_APPLICATION_SDK_VERSION_MAJOR, NOS_APPLICATION_SDK_VERSION_MINOR,
-		NOS_APPLICATION_SDK_VERSION_PATCH), "Incompatible Nodos SDK version");
+	if(!appApi)
+	{
+		std::cout << "Failed to create Nodos App API from SDK DLL." << std::endl;
+		return 1;
+	}
 
-	nosApplicationInfo appInfo{
+	std::optional<nos::app::AppServiceClient> client = nos::app::AppServiceClient::CreateClient(*appApi, "localhost:50053", {
 		.AppKey = "Sample-DX12-App",
 		.AppName = "Sample DX12 App"
-	};
-	nosAppServiceClient* client = pfnMakeAppServiceClient("localhost:50053", &appInfo);
-
-	Must(client, "Failed to create App Service Client");
+		});
+	Must(client.has_value(), "Failed to create App Service Client");
 
 	HelloTriangle app(windowHandle, windowWidth, windowHeight, vsync, gpuIndex);
 
-	auto eventDelegates = std::make_unique<SampleEventDelegates>(client, &app);
-	client->RegisterEventDelegates(client->ServiceHandle, &eventDelegates.get()->Delegates);
+	auto eventDelegates = std::make_unique<SampleEventDelegates>(*client, &app);
+	client->SetEventDelegates(*eventDelegates);
 
 	// Main loop
 	SDL_Event event;
 	bool running = true;
 	while (running)
 	{
-		while (!client->IsConnected(client->ServiceHandle))
+		while (!client->IsConnected())
 		{
 			std::cout << "Trying to connect to Nodos..." << std::endl;
-			client->TryConnect(client->ServiceHandle);
-			if (!client->IsConnected(client->ServiceHandle))
+			client->TryConnect();
+			if (!client->IsConnected())
 				std::this_thread::sleep_for(std::chrono::milliseconds(500));
 		}
 		SDL_PumpEvents();
@@ -1441,7 +1442,7 @@ int HelloTriangleMain(
 		if (std::optional<uint64_t> processedFrameNum = app.Render())
 		{
 			flatbuffers::FlatBufferBuilder fbb;
-			client->Send(client->ServiceHandle, nos::CreateAppEvent(fbb, nos::app::CreateExecutionCompleted(fbb, &eventDelegates->NodeId, *processedFrameNum)));
+			client->Send(nos::CreateAppEvent(fbb, nos::app::CreateExecutionCompleted(fbb, &eventDelegates->NodeId, *processedFrameNum)));
 		}
 	}
 
@@ -1452,9 +1453,10 @@ int HelloTriangleMain(
 
 	uint64_t frameCounter = app.FrameCounter;
 	flatbuffers::FlatBufferBuilder fbb;
-	client->Send(client->ServiceHandle, nos::CreateAppEvent(fbb, nos::app::CreateAppConnectionClosed(fbb, frameCounter)));
-	client->UnregisterEventDelegates(client->ServiceHandle);
-	pfnShutdownClient(client);
+	client->Send(nos::CreateAppEvent(fbb, nos::app::CreateAppConnectionClosed(fbb, frameCounter)));
+	client->ClearEventDelegates();
+	eventDelegates.reset();
+	client = std::nullopt;
 
 	return 0;
 }
