@@ -1094,7 +1094,7 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 		std::cout << "Connected to Nodos" << std::endl;
 	}
 
-	void OnNodeImported(nos::fb::Node const& appNode)
+	void OnNodeImported(nos::fb::Node const& appNode) override
 	{
 		NodeId = *appNode.id();
 		auto inputTexDef = ExportSharedTexture(App->Shared.Input.TextureHandle, App->Shared.Input.Texture.Get());
@@ -1138,7 +1138,7 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 				nos::fb::vec2 defaultPos = {0.0f, 0.0f};
 				std::vector<uint8_t> posPinBuf = nos::Buffer::From(defaultPos);
 				pins.push_back(nos::fb::CreatePinDirect(fbb, &*posPinId, "TrianglePosition", "nos.fb.vec2", nos::fb::ShowAs::INPUT_PIN,
-														nos::fb::CanShowAs::INPUT_PIN_ONLY, 0, &posPinBuf));
+														nos::fb::CanShowAs::INPUT_PIN_OR_PROPERTY, 0, &posPinBuf));
 			}
 			fbb.Finish(nos::CreatePartialNodeUpdateDirect(fbb, &NodeId,
 														  nos::ClearFlags::CLEAR_PINS | nos::ClearFlags::CLEAR_NODES,
@@ -1180,7 +1180,7 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 		return id;
 	}
 
-	void OnStateChanged(nos::app::ExecutionState newState)
+	void OnStateChanged(nos::app::ExecutionState newState) override
 	{
 		App->UpdateSyncState_GrpcThread(newState);
 		App->EnqueueTask([this, newState]
@@ -1196,7 +1196,7 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 			});
 	}
 
-	void OnExecuteStart(nos::app::AppExecuteStart const* appExecuteStart)
+	void OnExecuteStart(nos::app::AppExecuteStart const* appExecuteStart) override
 	{
 		std::unique_lock<std::mutex> lock(App->ExecutionMutex);
 		if (appExecuteStart->reset())
@@ -1226,31 +1226,6 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 		App->ExecutionCV.notify_all();
 	}
 
-	void HandleEvent(const nos::app::EngineEvent* event) override
-	{
-		using namespace nos::app;
-		switch (event->event_type())
-		{
-		case EngineEventUnion::AppConnectedEvent: {
-			OnAppConnected();
-			break;
-		}
-		case EngineEventUnion::NodeImported: {
-			OnNodeImported(*event->event_as<nos::app::NodeImported>()->node());
-			break;
-		}
-		case EngineEventUnion::StateChanged: {
-			OnStateChanged(event->event_as<nos::app::StateChanged>()->state());
-			break;
-		}
-		case EngineEventUnion::AppExecuteStart: {
-			OnExecuteStart(event->event_as<nos::app::AppExecuteStart>());
-			break;
-		}
-		default:
-			break;
-		}
-	}
 	void OnConnectionClosed() override 
 	{
 		{
