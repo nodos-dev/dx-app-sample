@@ -1049,11 +1049,9 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 		Client->Send(Client->ServiceHandle, root);
 	}
 
-	void OnAppConnected(const nos::fb::Node* appNode)
+	void OnAppConnected()
 	{
 		std::cout << "Connected to Nodos" << std::endl;
-		if (appNode)
-			OnNodeImported(*appNode);
 	}
 
 	void OnNodeImported(nos::fb::Node const& appNode)
@@ -1109,11 +1107,6 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 		return id;
 	}
 
-	void OnNodeUpdated(nos::fb::Node const& appNode)
-	{
-		OnNodeImported(appNode);
-	}
-
 	void OnStateChanged(nos::app::ExecutionState newState)
 	{
 		App->UpdateSyncState_GrpcThread(newState);
@@ -1147,11 +1140,7 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 		switch (event->event_type())
 		{
 		case EngineEventUnion::AppConnectedEvent: {
-			OnAppConnected(event->event_as<AppConnectedEvent>()->node());
-			break;
-		}
-		case EngineEventUnion::FullNodeUpdate: {
-			OnNodeUpdated(*event->event_as<nos::FullNodeUpdate>()->node());
+			OnAppConnected();
 			break;
 		}
 		case EngineEventUnion::NodeImported: {
