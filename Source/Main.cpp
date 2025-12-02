@@ -1216,7 +1216,6 @@ struct SampleEventDelegates : nos::app::AppEventDelegates
 						auto* vec2Data = reinterpret_cast<const nos::fb::vec2*>(update->value()->data());
 						App->TrianglePositionPin.Value.x = vec2Data->x();
 						App->TrianglePositionPin.Value.y = vec2Data->y();
-						std::cout << "Position updated: (" << vec2Data->x() << ", " << vec2Data->y() << ")" << std::endl;
 					}
 				}
 			}
@@ -1479,7 +1478,7 @@ int main(int argc, char** argv)
 		for (int i = 0; i < 3; ++i)
 			bundleRoot = bundleRoot.parent_path();
 		// Use App SDK version, not engine version
-		std::string appSdkVersion = "20.0"; // use correct App SDK version
+		std::string appSdkVersion = "21.0"; // use correct App SDK version
 		std::string sdkPath = GetSdkPathFromNosman(bundleRoot.string(), appSdkVersion);
 		if (!sdkPath.empty()) {
 			std::string candidate = sdkPath + "\\Binaries\\nosAppSDK.dll";
