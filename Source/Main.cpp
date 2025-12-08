@@ -1465,53 +1465,56 @@ int main(int argc, char** argv)
 		}
 	}
 
-	char exePath[MAX_PATH];
-	Must(GetModuleFileNameA(nullptr, exePath, MAX_PATH) != 0, "Failed to get executable path.");
-	std::filesystem::path exeDir = std::filesystem::absolute(exePath).parent_path();
-	std::filesystem::path sdkDllCandidate = exeDir / "nosAppSDK.dll";
-	nodosSdkDllPath = sdkDllCandidate.string();
+	if (nodosSdkDllPath.empty())
+	{
+		char exePath[MAX_PATH];
+		Must(GetModuleFileNameA(nullptr, exePath, MAX_PATH) != 0, "Failed to get executable path.");
+		std::filesystem::path exeDir = std::filesystem::absolute(exePath).parent_path();
+		std::filesystem::path sdkDllCandidate = exeDir / "nosAppSDK.dll";
+		nodosSdkDllPath = sdkDllCandidate.string();
 
-	// Try to find nosAppSDK.dll using nodos.exe if still not found
-	if (nodosSdkDllPath.empty() || !FileExists(nodosSdkDllPath)) {
-		// Try to find bundle root (assume two levels up from exeDir: Samples/nos.sample.dxapp/<version>/Binaries)
-		std::filesystem::path bundleRoot = exeDir;
-		for (int i = 0; i < 3; ++i)
-			bundleRoot = bundleRoot.parent_path();
-		// Use App SDK version, not engine version
-		std::string appSdkVersion = "21.0"; // use correct App SDK version
-		std::string sdkPath = GetSdkPathFromNosman(bundleRoot.string(), appSdkVersion);
-		if (!sdkPath.empty()) {
-			std::string candidate = sdkPath + "\\Binaries\\nosAppSDK.dll";
-			if (FileExists(candidate))
-				nodosSdkDllPath = candidate;
-		}
-	}
-
-	if (nodosSdkDllPath.empty() || !FileExists(nodosSdkDllPath)){
-		const char* sdkDir = std::getenv("NODOS_SDK_DIR");
-		if (sdkDir) {
-			std::string candidate = std::string(sdkDir) + "/bin/nosAppSDK.dll";
-			if (FileExists(candidate)) {
-				nodosSdkDllPath = candidate;
+		// Try to find nosAppSDK.dll using nodos.exe if still not found
+		if (nodosSdkDllPath.empty() || !FileExists(nodosSdkDllPath)) {
+			// Try to find bundle root (assume two levels up from exeDir: Samples/nos.sample.dxapp/<version>/Binaries)
+			std::filesystem::path bundleRoot = exeDir;
+			for (int i = 0; i < 3; ++i)
+				bundleRoot = bundleRoot.parent_path();
+			// Use App SDK version, not engine version
+			std::string appSdkVersion = "21.0"; // use correct App SDK version
+			std::string sdkPath = GetSdkPathFromNosman(bundleRoot.string(), appSdkVersion);
+			if (!sdkPath.empty()) {
+				std::string candidate = sdkPath + "\\Binaries\\nosAppSDK.dll";
+				if (FileExists(candidate))
+					nodosSdkDllPath = candidate;
 			}
 		}
-	}
+
+		if (nodosSdkDllPath.empty() || !FileExists(nodosSdkDllPath)){
+			const char* sdkDir = std::getenv("NODOS_SDK_DIR");
+			if (sdkDir) {
+				std::string candidate = std::string(sdkDir) + "/Process/Binaries/nosAppSDK.dll";
+				if (FileExists(candidate)) {
+					nodosSdkDllPath = candidate;
+				}
+			}
+		}
 
 #ifdef NODOS_APP_SDK_DLL
-	if (nodosSdkDllPath.empty() || !FileExists(nodosSdkDllPath)) {
-		const char* macroPath = NODOS_APP_SDK_DLL;
-		if (macroPath && FileExists(macroPath)) {
-			nodosSdkDllPath = macroPath;
+		if (nodosSdkDllPath.empty() || !FileExists(nodosSdkDllPath)) {
+			const char* macroPath = NODOS_APP_SDK_DLL;
+			if (macroPath && FileExists(macroPath)) {
+				nodosSdkDllPath = macroPath;
+			}
 		}
-	}
 #endif
 
-	while (nodosSdkDllPath.empty() || !FileExists(nodosSdkDllPath)) {
-		std::cout << "Enter path to Nodos SDK DLL: ";
-		std::getline(std::cin, nodosSdkDllPath);
-		if (!FileExists(nodosSdkDllPath)) {
-			std::cout << "File does not exist: " << nodosSdkDllPath << std::endl;
-			nodosSdkDllPath.clear();
+		while (nodosSdkDllPath.empty() || !FileExists(nodosSdkDllPath)) {
+			std::cout << "Enter path to Nodos SDK DLL: ";
+			std::getline(std::cin, nodosSdkDllPath);
+			if (!FileExists(nodosSdkDllPath)) {
+				std::cout << "File does not exist: " << nodosSdkDllPath << std::endl;
+				nodosSdkDllPath.clear();
+			}
 		}
 	}
 
