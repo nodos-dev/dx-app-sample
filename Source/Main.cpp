@@ -1347,7 +1347,7 @@ int HelloTriangleMain(
 	windowHandle = wmInfo.info.win.window;
 
 	// Initialize Nodos SDK
-	struct DXAppProcLoader : nos::app::AppApiProcLoader
+	struct DXAppProcLoader : nos::app::IAppApiProcLoader
 	{
 		DXAppProcLoader(HMODULE module) : ApiModule(module)
 		{
@@ -1370,19 +1370,24 @@ int HelloTriangleMain(
 	Must(sdkModule, ("Failed to load Nodos SDK DLL: " + nodosSdkDllPath).c_str());
 
 	std::shared_ptr<DXAppProcLoader> procLoader = std::make_shared<DXAppProcLoader>(sdkModule);
-	std::optional<nos::app::AppApi> appApi = nos::app::AppApi::Create(procLoader);
+	nos::Result<nos::app::AppApi> appApiRes = nos::app::AppApi::Create(procLoader);
 
-	if(!appApi)
+	if (auto err = appApiRes.Error())
 	{
-		std::cout << "Failed to create Nodos App API from SDK DLL." << std::endl;
+		std::cout << "Failed to create Nodos App API: " << *err << std::endl;
 		return 1;
 	}
 
-	std::optional<nos::app::AppServiceClient> client = nos::app::AppServiceClient::CreateClient(*appApi, "localhost:50053", {
+	nos::Result<nos::app::AppServiceClient> clientRes = nos::app::AppServiceClient::CreateClient(std::make_shared<nos::app::AppApi>(std::move(*appApiRes)), "localhost:50053", {
 		.AppKey = "Sample-DX12-App",
 		.AppName = "Sample DX12 App"
 		});
-	Must(client.has_value(), "Failed to create App Service Client");
+	if (auto err = clientRes.Error())
+	{
+		std::cout << "Failed to create Nodos App Service Client: " << *err << std::endl;
+		return 1;
+	}
+	auto client = std::make_unique<nos::app::AppServiceClient>(std::move(*clientRes));
 
 	HelloTriangle app(windowHandle, windowWidth, windowHeight, vsync, gpuIndex);
 
@@ -1430,7 +1435,7 @@ int HelloTriangleMain(
 	client->Send(nos::CreateAppEvent(fbb, nos::app::CreateAppConnectionClosed(fbb, frameCounter)));
 	client->ClearEventDelegates();
 	eventDelegates.reset();
-	client = std::nullopt;
+	client.reset();
 
 	return 0;
 }
